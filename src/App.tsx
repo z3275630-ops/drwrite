@@ -1,12 +1,20 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Bookshelf from './components/Bookshelf';
 import Editor from './components/Editor';
 import { Toasts } from './components/Toast';
+import { getTheme } from './lib/library';
 
 type View = { name: 'shelf' } | { name: 'editor'; root: string; dirName: string };
 
 export default function App() {
   const [view, setView] = useState<View>({ name: 'shelf' });
+
+  useEffect(() => {
+    void getTheme().then((t) => {
+      document.body.dataset.theme = t;
+    });
+  }, []);
+
   return (
     <>
       {view.name === 'shelf' ? (

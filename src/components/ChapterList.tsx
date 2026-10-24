@@ -10,6 +10,7 @@ export default function ChapterList(props: {
   onRename: (id: string, title: string) => void;
   onDelete: (meta: ChapterMeta) => void;
   onMove: (id: string, dir: -1 | 1) => void;
+  onSynopsis: (meta: ChapterMeta) => void;
 }) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -33,7 +34,7 @@ export default function ChapterList(props: {
         {props.chapters.map((c) => (
           <div
             key={c.id}
-            className={`chapter-item ${c.id === props.activeId ? 'active' : ''}`}
+            className={`chapter-item ${c.id === props.activeId ? 'active' : ''} ${c.synopsis ? 'has-syn' : ''}`}
             onClick={() => renamingId !== c.id && props.onSelect(c.id)}
           >
             {renamingId === c.id ? (
@@ -84,10 +85,18 @@ export default function ChapterList(props: {
                   >
                     改
                   </button>
+                  <button className="op" title="梗概" onClick={() => props.onSynopsis(c)}>
+                    概
+                  </button>
                   <button className="op danger" title="删除本章" onClick={() => props.onDelete(c)}>
                     删
                   </button>
                 </span>
+                {c.synopsis && (
+                  <div className="chapter-syn" title={c.synopsis} onClick={(e) => { e.stopPropagation(); props.onSynopsis(c); }}>
+                    {c.synopsis}
+                  </div>
+                )}
               </>
             )}
           </div>

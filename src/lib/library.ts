@@ -17,8 +17,25 @@ import {
 import { countWords, docToMarkdown, docToPlainText } from './words';
 import { genId, nowIso, todayStr } from './id';
 import { updateRefsForChapter, rebuildAllRefs, readRefs } from './entities';
+import * as ent from './entities';
+import { GENRE_TEMPLATES } from './templates';
 
 export { genId, nowIso, todayStr };
+
+/* ---------- 界面主题（也存全局设置） ---------- */
+
+export type ThemeName = 'light' | 'dark';
+
+export async function getTheme(): Promise<ThemeName> {
+  const v = await readJsonOrNull(await appSettingsPath());
+  return (v as { theme?: string } | null)?.theme === 'dark' ? 'dark' : 'light';
+}
+
+export async function setTheme(t: ThemeName): Promise<void> {
+  const p = await appSettingsPath();
+  const v = (await readJsonOrNull(p)) as Record<string, JsonValue> | null;
+  await writeJson(p, { ...(v ?? {}), theme: t } as unknown as JsonValue);
+}
 
 function timestampName(): string {
   const d = new Date();
@@ -119,7 +136,8 @@ export function newChapterFile(meta: ChapterMeta): ChapterFile {
 export async function createBook(
   root: string,
   title: string,
-  dailyGoal?: number
+  dailyGoal?: number,
+  templateId?: string
 ): Promise<BookEntry> {
   const id = genId();
   let dirName = `${safeName(title)}-${id.slice(0, 6)}`;
@@ -136,6 +154,7 @@ export async function createBook(
     id,
     protocolVersion: MODEL_VERSION,
     title: title.trim() || '未命名',
+    genreTemplate: templateId,
     dailyGoal,
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -153,6 +172,18 @@ export async function createBook(
   await writeText(joinPath(bookDir, 'entities', 'characters', '.keep'), '');
   await writeText(joinPath(bookDir, 'entities', 'lore', '.keep'), '');
   await writeJson(joinPath(bookDir, 'refs.json'), []);
+
+  // 流派模板：生成带引导问题的占位词条
+  if (templateId) {
+    const tpl = GENRE_TEMPLATES.find((t) => t.id === templateId);
+    if (tpl) {
+      for (const s of tpl.lores) {
+        const l = ent.newLore(s.name, s.category);
+        l.content = s.content;
+        await ent.saveLore(root, dirName, l);
+      }
+    }
+  }
   return { dirName, book };
 }
 

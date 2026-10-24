@@ -15,6 +15,7 @@ export default function Sidebar(props: {
   onRename: (id: string, title: string) => void;
   onDelete: (meta: ChapterMeta) => void;
   onMove: (id: string, dir: -1 | 1) => void;
+  onSynopsis: (meta: ChapterMeta) => void;
   chars: Character[];
   lore: LoreEntry[];
   refs: RefIndexEntry[];
@@ -65,6 +66,7 @@ export default function Sidebar(props: {
             onRename={props.onRename}
             onDelete={props.onDelete}
             onMove={props.onMove}
+            onSynopsis={props.onSynopsis}
           />
         )
       ) : tab === 'chars' ? (

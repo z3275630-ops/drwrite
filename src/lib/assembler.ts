@@ -58,6 +58,7 @@ export interface AssembleInput {
   /** 本章正文尾部（续写用长一点，改写用短一点） */
   chapterTail: string;
   prevChapterTail?: string;
+  prevSynopsis?: string;
   selection?: string;
   /** 相关实体（本章出场） */
   relatedIds: string[];
@@ -83,6 +84,7 @@ export function buildAiMessages(input: AssembleInput, chars: Character[], lore: 
   const cards = entityCardLines(chars, lore, input.relatedIds);
   if (cards.length) parts.push('【设定资料】\n' + cards.join('\n'));
   parts.push(`【本章】第${input.chapter.index + 1}章 ${input.chapter.title}${input.chapter.synopsis ? '：' + clip(input.chapter.synopsis, 100) : ''}`);
+  if (input.prevSynopsis) parts.push('【上一章梗概】' + clip(input.prevSynopsis, 150));
   if (input.prevChapterTail) parts.push('【上一章结尾】\n' + clip(input.prevChapterTail, 600));
   if (input.chapterTail) parts.push('【本章前文】\n' + clip(input.chapterTail, input.kind === 'continue' ? 2000 : 1200));
 

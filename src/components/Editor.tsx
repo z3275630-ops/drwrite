@@ -30,6 +30,7 @@ import AiSettingsModal from './AiSettingsModal';
 import ProposalModal from './ProposalModal';
 import type { ProposalState } from './ProposalModal';
 import StructureTab from './StructureTab';
+import ChatPanel from './ChatPanel';
 import type { EntityTarget } from './types';
 import type { Foreshadow } from '../types';
 import type { TimelineData } from '../lib/structure';
@@ -106,6 +107,11 @@ export default function Editor(props: {
   const [timeline, setTimeline] = useState<TimelineData>({ lanes: [], events: [] });
   const [foreshadows, setForeshadows] = useState<Foreshadow[]>([]);
   const [aiReport, setAiReport] = useState<{ phase: 'loading' | 'done' | 'error'; text?: string; error?: string } | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [synModal, setSynModal] = useState<{ meta: ChapterMeta; draft: string; busy: boolean } | null>(null);
+  const [theme, setThemeState] = useState<'light' | 'dark'>(
+    (document.body.dataset.theme as 'light' | 'dark') ?? 'light'
+  );
 
   const dirtyRef = useRef(false);
   const timerRef = useRef<number | undefined>(undefined);
@@ -732,7 +738,7 @@ export default function Editor(props: {
     pendingAiRef.current = { kind, custom, range };
     const cfg = aiCfg;
 
-    const runOnce = () => {
+      const runOnce = () => {
       setProposal({
         phase: 'loading',
         title: TASK_LABELS[kind] + (kind === 'custom' && custom ? '：' + clipText(custom, 12) : ''),
@@ -743,13 +749,17 @@ export default function Editor(props: {
       void (async () => {
         try {
           let prevTail: string | undefined;
-          if (kind === 'continue' && meta.index > 0) {
+          let prevSynopsis: string | undefined;
+          if (meta.index > 0) {
             const prev = book.chapters[meta.index - 1];
-            const pf = await lib.readChapter(root, dirName, prev.id);
-            prevTail = pf ? docToPlainText(pf.doc as never).slice(-500) : undefined;
+            prevSynopsis = prev.synopsis;
+            if (kind === 'continue') {
+              const pf = await lib.readChapter(root, dirName, prev.id);
+              prevTail = pf ? docToPlainText(pf.doc as never).slice(-500) : undefined;
+            }
           }
           const messages = buildAiMessages(
-            { book, chapter: meta, chapterTail, prevChapterTail: prevTail, selection, relatedIds, kind, custom },
+            { book, chapter: meta, chapterTail, prevChapterTail: prevTail, prevSynopsis, selection, relatedIds, kind, custom },
             chars,
             lore
           );
@@ -797,6 +807,60 @@ export default function Editor(props: {
     }
     setProposal(null);
     toast('已应用到正文，Ctrl+Z 可整段撤销');
+  };
+
+  /* ---------- P4：梗概 / 对话 / 主题 ---------- */
+
+  const toggleTheme = async () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.body.dataset.theme = next;
+    setThemeState(next);
+    await lib.setTheme(next);
+  };
+
+  const saveSynopsis = async () => {
+    if (!synModal || !book) return;
+    const chapters = book.chapters.map((c) =>
+      c.id === synModal.meta.id ? { ...c, synopsis: synModal.draft.trim() || undefined } : c
+    );
+    await persistBook({ ...book, chapters });
+    setSynModal(null);
+    toast('梗概已保存');
+  };
+
+  const generateSynopsis = async () => {
+    if (!synModal || !aiCfg || !book) return;
+    const meta = synModal.meta;
+    const f = await lib.readChapter(root, dirName, meta.id);
+    if (!f) {
+      toast('读不到这一章', 'err');
+      return;
+    }
+    setSynModal({ ...synModal, busy: true });
+    try {
+      const text = docToPlainText(f.doc as never).slice(0, 8000);
+      const cards = entityCardLines(chars, lore, [...new Set(refs.filter((r) => r.chapterId === meta.id).map((r) => r.targetId))]);
+      const r = await callAi(
+        aiCfg,
+        [
+          { role: 'system', content: '你负责为长篇小说生成章节梗概。只输出梗概本身，不解释。' },
+          {
+            role: 'user',
+            content:
+              `《${book.title}》第${meta.index + 1}章 ${meta.title}\n` +
+              (cards.length ? '设定资料：\n' + cards.join('\n') + '\n\n' : '') +
+              '本章正文：\n' +
+              text +
+              '\n\n任务：用 50～80 字概括本章剧情要点（谁、在哪、发生了什么、结果/悬念）。只输出概括。',
+          },
+        ],
+        { maxTokens: 600, temperature: 0.4 }
+      );
+      setSynModal((m) => (m ? { ...m, draft: r.text, busy: false } : m));
+    } catch (e) {
+      setSynModal((m) => (m ? { ...m, busy: false } : m));
+      toast(String(e instanceof Error ? e.message : e), 'err');
+    }
   };
 
   /* ---------- 顶栏渲染 ---------- */
@@ -872,8 +936,14 @@ export default function Editor(props: {
           </span>
         </div>
         <div className="topbar-actions">
+          <button className="ghost-btn icon-only" title={theme === 'dark' ? '切到浅色' : '切到深色'} onClick={() => void toggleTheme()}>
+            {theme === 'dark' ? '☀' : '☾'}
+          </button>
           <button className="ghost-btn" onClick={() => setSearchOpen(true)}>
             🔍 搜索
+          </button>
+          <button className={'ghost-btn' + (chatOpen ? ' on' : '')} onClick={() => setChatOpen(!chatOpen)}>
+            AI 对话
           </button>
           <div className="menu-anchor">
             <button
@@ -920,6 +990,7 @@ export default function Editor(props: {
           onRename={(id, t) => void renameChapter(id, t)}
           onDelete={(m) => setDeleteTarget(m)}
           onMove={(id, d) => void moveChapter(id, d)}
+          onSynopsis={(m) => setSynModal({ meta: m, draft: m.synopsis ?? '', busy: false })}
           chars={chars}
           lore={lore}
           refs={refs}
@@ -1004,6 +1075,25 @@ export default function Editor(props: {
             onDelete={(t) => void removeEntity(t)}
             onJumpChapter={(id) => void jumpToChapter(id)}
             onJumpEntity={setInspector}
+          />
+        )}
+        {chatOpen && book && (
+          <ChatPanel
+            root={root}
+            dirName={dirName}
+            book={book}
+            chars={chars}
+            lore={lore}
+            foreshadows={foreshadows}
+            refs={refs}
+            aiCfg={aiCfg}
+            activeChapterId={activeId}
+            chapterTail={editor ? editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n') : ''}
+            onClose={() => setChatOpen(false)}
+            onNeedSettings={() => {
+              setChatOpen(false);
+              setAiSettingsOpen(true);
+            }}
           />
         )}
       </div>
@@ -1215,6 +1305,37 @@ export default function Editor(props: {
           onRegenerate={() => rerunAiRef.current?.()}
           onClose={() => setProposal(null)}
         />
+      )}
+
+      {/* 章节梗概 */}
+      {synModal && (
+        <Modal title={`第${synModal.meta.index + 1}章 · 梗概`} onClose={() => setSynModal(null)}>
+          <p className="hint-text">本章的剧情要点。手写的优先；也可以让 AI 读完本章帮你概括。续写、巡检、AI 对话都会带着它。</p>
+          <textarea
+            className="syn-area"
+            rows={4}
+            autoFocus
+            value={synModal.draft}
+            placeholder="50～80 字：谁、在哪、发生了什么、结果或悬念"
+            onChange={(e) => setSynModal({ ...synModal, draft: e.target.value })}
+          />
+          <div className="modal-actions">
+            <button
+              className="ghost-btn"
+              disabled={!aiCfg || synModal.busy || !synModal.meta.wordCount}
+              title={!aiCfg ? '先配置 AI' : !synModal.meta.wordCount ? '这章还没写内容' : ''}
+              onClick={() => void generateSynopsis()}
+            >
+              {synModal.busy ? 'AI 概括中…' : '✦ AI 概括本章'}
+            </button>
+            <button className="ghost-btn" onClick={() => setSynModal(null)}>
+              取消
+            </button>
+            <button className="primary-btn" onClick={() => void saveSynopsis()}>
+              保存
+            </button>
+          </div>
+        </Modal>
       )}
 
       {/* AI 巡检报告 */}

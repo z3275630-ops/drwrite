@@ -1,0 +1,28 @@
+/**
+ * AI 对话：一本书记一段持续的创作讨论（写作顾问，不改正文）。
+ * 文件：entities/chat.json，只存 user/assistant 轮次；上下文每次发送时重建。
+ */
+import type { JsonValue } from './json';
+import { readJsonOrNull, writeJson, joinPath } from './fs';
+
+export interface ChatMsg {
+  role: 'user' | 'assistant';
+  content: string;
+  at: string;
+}
+
+const MAX_STORED = 200;
+
+function chatPath(root: string, dirName: string): string {
+  return joinPath(joinPath(root, dirName), 'entities', 'chat.json');
+}
+
+export async function loadChat(root: string, dirName: string): Promise<ChatMsg[]> {
+  const v = await readJsonOrNull(chatPath(root, dirName));
+  return Array.isArray(v) ? (v as unknown as ChatMsg[]) : [];
+}
+
+export async function saveChat(root: string, dirName: string, msgs: ChatMsg[]): Promise<void> {
+  const trimmed = msgs.length > MAX_STORED ? msgs.slice(msgs.length - MAX_STORED) : msgs;
+  await writeJson(chatPath(root, dirName), trimmed as unknown as JsonValue);
+}

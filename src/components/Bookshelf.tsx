@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { BookEntry } from '../lib/library';
 import * as lib from '../lib/library';
 import { deleteDir, joinPath, isDesktop } from '../lib/fs';
+import { GENRE_TEMPLATES } from '../lib/templates';
 import { toast } from './Toast';
 import { Modal } from './Modal';
 
@@ -17,9 +18,11 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
   const [showNew, setShowNew] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newGoal, setNewGoal] = useState('4000');
+  const [newGenre, setNewGenre] = useState('');
   const [creating, setCreating] = useState(false);
   const [delTarget, setDelTarget] = useState<BookEntry | null>(null);
   const [delText, setDelText] = useState('');
+  const [theme, setThemeState] = useState<'light' | 'dark'>((document.body.dataset.theme as 'light' | 'dark') ?? 'light');
 
   useEffect(() => {
     void (async () => {
@@ -38,7 +41,13 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
     if (!title) return;
     setCreating(true);
     try {
-      const entry = await lib.createBook(root, title, Number(newGoal) > 0 ? Number(newGoal) : undefined);
+      const tpl = GENRE_TEMPLATES.find((t) => t.id === newGenre);
+      const entry = await lib.createBook(
+        root,
+        title,
+        Number(newGoal) > 0 ? Number(newGoal) : tpl?.goal,
+        newGenre || undefined
+      );
       setShowNew(false);
       setNewTitle('');
       toast('已创建《' + entry.book.title + '》');
@@ -48,6 +57,13 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
     } finally {
       setCreating(false);
     }
+  };
+
+  const toggleTheme = async () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.body.dataset.theme = next;
+    setThemeState(next);
+    await lib.setTheme(next);
   };
 
   const doDelete = async () => {
@@ -93,6 +109,9 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
         </div>
         {root && (
           <div className="shelf-loc">
+            <button className="ghost-btn small icon-only" title={theme === 'dark' ? '切到浅色' : '切到深色'} onClick={() => void toggleTheme()}>
+              {theme === 'dark' ? '☀' : '☾'}
+            </button>
             <span className="loc-path" title={root}>
               书库：{root}
             </span>
@@ -178,15 +197,26 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
               onKeyDown={(e) => e.key === 'Enter' && void createBook()}
             />
           </label>
-          <label className="field">
-            <span>日更目标（字，可留空）</span>
-            <input
-              value={newGoal}
-              inputMode="numeric"
-              onChange={(e) => setNewGoal(e.target.value.replace(/\D/g, ''))}
-              onKeyDown={(e) => e.key === 'Enter' && void createBook()}
-            />
-          </label>
+      <label className="field">
+        <span>流派模板（可选：预置一组带引导问题的设定词条）</span>
+        <select value={newGenre} onChange={(e) => setNewGenre(e.target.value)}>
+          <option value="">不使用模板</option>
+          {GENRE_TEMPLATES.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>日更目标（字，可留空）</span>
+        <input
+          value={newGoal}
+          inputMode="numeric"
+          onChange={(e) => setNewGoal(e.target.value.replace(/\D/g, ''))}
+          onKeyDown={(e) => e.key === 'Enter' && void createBook()}
+        />
+      </label>
           <div className="modal-actions">
             <button className="ghost-btn" onClick={() => setShowNew(false)}>
               取消
