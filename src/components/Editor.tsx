@@ -1,17 +1,52 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import type { Book, ChapterFile, ChapterMeta } from '../types';
+import type { Editor as TipTapEditor } from '@tiptap/react';
+import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, RefIndexEntry } from '../types';
 import { MODEL_VERSION } from '../types';
 import type { JsonValue } from '../lib/json';
 import { countWords } from '../lib/words';
 import * as lib from '../lib/library';
 import { cnNum } from '../lib/cnnum';
+import {
+  EntityRefMark,
+  EntityHintExtension,
+  entityRefMarkName,
+  type HintEntity,
+} from '../extensions/entityRef';
+import * as ent from '../lib/entities';
 import { toast } from './Toast';
 import { Modal } from './Modal';
-import ChapterList from './ChapterList';
+import Sidebar from './Sidebar';
+import Inspector from './Inspector';
+import { CharacterFormModal, LoreFormModal } from './EntityForms';
+import SearchModal from './SearchModal';
+import GraphModal from './GraphModal';
+import type { EntityTarget } from './types';
 
 const p2 = (n: number) => String(n).padStart(2, '0');
+
+interface QuickItem {
+  kind: 'character' | 'lore';
+  id: string;
+  name: string;
+  sub: string;
+}
+
+interface AtPopup {
+  anchor: number;
+  query: string;
+  items: QuickItem[];
+  idx: number;
+}
+
+interface HintPop {
+  x: number;
+  y: number;
+  from: number;
+  to: number;
+  entity: HintEntity;
+}
 
 export default function Editor(props: {
   root: string;
@@ -27,35 +62,71 @@ export default function Editor(props: {
   const [editorEmpty, setEditorEmpty] = useState(true);
   const [renamingBook, setRenamingBook] = useState(false);
   const [bookTitleDraft, setBookTitleDraft] = useState('');
-  const [menu, setMenu] = useState<'export' | 'snapshot' | null>(null);
+  const [menu, setMenu] = useState<'export' | null>(null);
   const [snapshots, setSnapshots] = useState<string[]>([]);
   const [snapPanelOpen, setSnapPanelOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ChapterMeta | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /* ---------- 资料库状态 ---------- */
+  const [chars, setChars] = useState<Character[]>([]);
+  const [lore, setLore] = useState<LoreEntry[]>([]);
+  const [refs, setRefs] = useState<RefIndexEntry[]>([]);
+  const [inspector, setInspector] = useState<EntityTarget | null>(null);
+  const [editing, setEditing] = useState<{ entity: Character | LoreEntry } | null>(null);
+  const [atPopup, setAtPopup] = useState<AtPopup | null>(null);
+  const [hintPop, setHintPop] = useState<HintPop | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
+
   const dirtyRef = useRef(false);
   const timerRef = useRef<number | undefined>(undefined);
   const switchingRef = useRef(false);
+  const hintRef = useRef<HintEntity[]>([]);
+  const atRef = useRef<AtPopup | null>(null);
+  atRef.current = atPopup;
+  const paperRef = useRef<HTMLDivElement>(null);
+  /** 编辑器事件处理器走 ref 转发，永远拿到最新闭包 */
+  const handlersRef = useRef<{
+    onUpdate?: (ed: TipTapEditor) => void;
+    onKey?: (e: KeyboardEvent) => boolean;
+    onClick?: () => void;
+  }>({});
 
   const editor = useEditor({
-    extensions: [StarterKit],
+    extensions: [
+      StarterKit,
+      EntityRefMark,
+      EntityHintExtension.configure({
+        getEntities: () => hintRef.current,
+        onHintClick: (info) =>
+          setHintPop({ x: info.clientX, y: info.clientY, from: info.from, to: info.to, entity: info.entity }),
+        onRefClick: (info) =>
+          setInspector({ kind: info.targetType === 'lore' ? 'lore' : 'character', id: info.targetId }),
+      }),
+    ],
     content: lib.emptyDoc() as never,
     editorProps: {
       attributes: { class: 'novel-doc', spellcheck: 'false' },
+      handleKeyDown: (_v, e) => handlersRef.current.onKey?.(e) ?? false,
+      handleClick: () => {
+        handlersRef.current.onClick?.();
+        return false;
+      },
     },
-    onUpdate: ({ editor: ed }) => {
-      if (switchingRef.current) return;
-      dirtyRef.current = true;
-      setSaveState('dirty');
-      setLiveWords(countWords(ed.getText()));
-      setEditorEmpty(ed.isEmpty);
-      window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => void flushSave(), 800);
-    },
+    onUpdate: ({ editor: ed }) => handlersRef.current.onUpdate?.(ed),
   });
 
   /* ---------- 保存 ---------- */
+
+  const refreshRefs = useCallback(async () => {
+    try {
+      setRefs(await ent.readRefs(root, dirName));
+    } catch {
+      // 索引读取失败不致命
+    }
+  }, [root, dirName]);
 
   const flushSave = useCallback(async () => {
     window.clearTimeout(timerRef.current);
@@ -76,6 +147,7 @@ export default function Editor(props: {
       const next = await lib.saveChapterWithStats(root, dirName, book, file);
       setBook(next);
       setSaveState('saved');
+      void refreshRefs();
       const d = new Date();
       setLastSaved(`${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`);
     } catch (e) {
@@ -83,7 +155,7 @@ export default function Editor(props: {
       setSaveState('dirty');
       toast('保存失败：' + String(e), 'err');
     }
-  }, [book, activeId, editor, root, dirName]);
+  }, [book, activeId, editor, root, dirName, refreshRefs]);
 
   /** 把一份文档载入编辑器（不计为修改，不触发自动保存） */
   const loadChapterInto = useCallback(
@@ -99,11 +171,144 @@ export default function Editor(props: {
       setEditorEmpty(editor.isEmpty);
       setSaveState('saved');
       dirtyRef.current = false;
+      setAtPopup(null);
+      setHintPop(null);
     },
     [editor]
   );
 
+  /* ---------- @ 引用弹层 ---------- */
+
+  const quickFilter = useCallback(
+    (q: string): QuickItem[] => {
+      const ql = q.trim().toLowerCase();
+      const pool: QuickItem[] = [
+        ...chars.map((c) => ({ kind: 'character' as const, id: c.id, name: c.name, sub: `人物 · ${c.tier}` })),
+        ...lore.map((l) => ({ kind: 'lore' as const, id: l.id, name: l.name, sub: `设定 · ${l.category}` })),
+      ];
+      const hit = pool.filter((x) => ent.aliasMatch(x.name, undefined, ql) || (ql && x.name.toLowerCase().includes(ql)));
+      hit.sort((a, b) => {
+        const as = ql && a.name.toLowerCase().startsWith(ql) ? 0 : 1;
+        const bs = ql && b.name.toLowerCase().startsWith(ql) ? 0 : 1;
+        return as - bs || (a.kind === 'character' ? -1 : 1);
+      });
+      return hit.slice(0, 8);
+    },
+    [chars, lore]
+  );
+
+  const insertAtRef = useCallback(
+    (item: QuickItem, anchor: number) => {
+      if (!editor) return;
+      const to = editor.state.selection.from;
+      if (to < anchor) {
+        setAtPopup(null);
+        return;
+      }
+      editor
+        .chain()
+        .focus()
+        .insertContentAt({ from: anchor, to }, {
+          type: 'text',
+          text: item.name,
+          marks: [
+            {
+              type: entityRefMarkName,
+              attrs: { targetType: item.kind, targetId: item.id, displayText: item.name },
+            },
+          ],
+        } as never)
+        .run();
+      setAtPopup(null);
+    },
+    [editor]
+  );
+
+  const updateAtPopup = useCallback(
+    (ed: TipTapEditor) => {
+      const sel = ed.state.selection;
+      if (!sel.empty) {
+        if (atRef.current) setAtPopup(null);
+        return;
+      }
+      const $from = sel.$from;
+      const before = $from.parent.textBetween(0, $from.parentOffset, undefined, '\uFFFC');
+      const m = before.match(/[@＠]([^@\s，。！？；：、,.!?;:\[\]()（）"'"']{0,24})$/);
+      if (!m) {
+        if (atRef.current) setAtPopup(null);
+        return;
+      }
+      const anchor = $from.pos - m[0].length;
+      const query = m[1];
+      const items = quickFilter(query);
+      if (!items.length) {
+        if (atRef.current) setAtPopup(null);
+        return;
+      }
+      setAtPopup((p) => (p && p.anchor === anchor && p.query === query ? p : { anchor, query, items, idx: 0 }));
+    },
+    [quickFilter]
+  );
+
+  handlersRef.current.onUpdate = (ed: TipTapEditor) => {
+    if (switchingRef.current) return;
+    dirtyRef.current = true;
+    setSaveState('dirty');
+    setLiveWords(countWords(ed.getText()));
+    setEditorEmpty(ed.isEmpty);
+    window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => void flushSave(), 800);
+    updateAtPopup(ed);
+  };
+
+  handlersRef.current.onKey = (e: KeyboardEvent) => {
+    const pop = atRef.current;
+    if (!pop) return false;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const d = e.key === 'ArrowDown' ? 1 : -1;
+      setAtPopup({ ...pop, idx: (pop.idx + d + pop.items.length) % pop.items.length });
+      return true;
+    }
+    if (e.key === 'Enter') {
+      insertAtRef(pop.items[pop.idx], pop.anchor);
+      return true;
+    }
+    if (e.key === 'Escape') {
+      setAtPopup(null);
+      return true;
+    }
+    return false;
+  };
+
+  handlersRef.current.onClick = () => {
+    if (atRef.current) setAtPopup(null);
+    if (hintPop) setHintPop(null);
+  };
+
+  /* ---------- 淡提示 → 转为关联 ---------- */
+
+  const convertHint = useCallback(() => {
+    if (!editor || !hintPop) return;
+    const text = editor.state.doc.textBetween(hintPop.from, hintPop.to);
+    const mark = editor.schema.mark(entityRefMarkName, {
+      targetType: hintPop.entity.kind,
+      targetId: hintPop.entity.id,
+      displayText: text,
+    });
+    editor.view.dispatch(editor.state.tr.addMark(hintPop.from, hintPop.to, mark));
+    setHintPop(null);
+  }, [editor, hintPop]);
+
   /* ---------- 初始化 ---------- */
+
+  const reloadEntities = useCallback(async () => {
+    const [cs, ls] = await Promise.all([
+      ent.listCharacters(root, dirName),
+      ent.listLore(root, dirName),
+    ]);
+    setChars(cs);
+    setLore(ls);
+  }, [root, dirName]);
 
   useEffect(() => {
     void (async () => {
@@ -114,6 +319,8 @@ export default function Editor(props: {
         return;
       }
       setBook(b);
+      void reloadEntities();
+      void refreshRefs();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root, dirName]);
@@ -130,6 +337,22 @@ export default function Editor(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, book, activeId]);
 
+  // 实体表变化 → 刷新淡提示 + 失效引用样式
+  useEffect(() => {
+    hintRef.current = [
+      ...chars.map((c) => ({ kind: 'character' as const, id: c.id, name: c.name, aliases: c.aliases })),
+      ...lore.map((l) => ({ kind: 'lore' as const, id: l.id, name: l.name, aliases: l.aliases })),
+    ];
+    if (editor) editor.view.dispatch(editor.state.tr.setMeta('drwriteHintRefresh', true));
+    if (editor) {
+      const known = new Set([...chars.map((c) => c.id), ...lore.map((l) => l.id)]);
+      editor.view.dom.querySelectorAll<HTMLElement>('[data-entity-id]').forEach((el) => {
+        el.classList.toggle('dangling', !known.has(el.getAttribute('data-entity-id') ?? ''));
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chars, lore, editor, activeId, liveWords]);
+
   /* ---------- 全局保存钩子 ---------- */
 
   useEffect(() => {
@@ -138,6 +361,7 @@ export default function Editor(props: {
         e.preventDefault();
         void flushSave();
       }
+      if (e.key === 'Escape') setHintPop(null);
     };
     const onHide = () => {
       if (document.visibilityState === 'hidden') void flushSave();
@@ -214,6 +438,8 @@ export default function Editor(props: {
       stats: { ...book.stats, totalWords: rest.reduce((s, c) => s + c.wordCount, 0) },
     };
     await lib.deleteChapterFile(root, dirName, meta.id);
+    await ent.updateRefsForChapter(root, dirName, meta.id, null);
+    void refreshRefs();
     await persistBook(next);
     if (activeId === meta.id && rest.length) {
       const idx = Math.min(meta.index, rest.length - 1);
@@ -233,6 +459,38 @@ export default function Editor(props: {
       await persistBook({ ...book, title: bookTitleDraft.trim() });
     }
     setRenamingBook(false);
+  };
+
+  /* ---------- 资料库操作 ---------- */
+
+  const saveEntity = async (entity: Character | LoreEntry) => {
+    try {
+      if (entity.type === 'character') await ent.saveCharacter(root, dirName, entity);
+      else await ent.saveLore(root, dirName, entity);
+      setEditing(null);
+      await reloadEntities();
+      toast('已保存：' + entity.name);
+    } catch (e) {
+      toast('保存失败：' + String(e), 'err');
+    }
+  };
+
+  const removeEntity = async (t: EntityTarget) => {
+    try {
+      await ent.deleteEntity(root, dirName, t.kind, t.id);
+      setInspector(null);
+      await reloadEntities();
+      void refreshRefs();
+      toast('已删除条目');
+    } catch (e) {
+      toast('删除失败：' + String(e), 'err');
+    }
+  };
+
+  const jumpToChapter = async (id: string) => {
+    setInspector(null);
+    setSearchOpen(false);
+    await switchChapter(id);
   };
 
   /* ---------- 导出 ---------- */
@@ -298,6 +556,7 @@ export default function Editor(props: {
           setActiveId(first.id);
         }
       }
+      void refreshRefs();
       toast('已恢复；恢复前的内容自动另存了一份快照');
     } catch (e) {
       toast('恢复失败：' + String(e), 'err');
@@ -315,6 +574,17 @@ export default function Editor(props: {
 
   const saveLabel =
     saveState === 'saving' ? '保存中…' : saveState === 'dirty' ? '未保存' : lastSaved ? '已保存 ' + lastSaved : '已保存';
+
+  // @ 弹层坐标（相对 .paper）
+  let atStyle: React.CSSProperties | undefined;
+  if (atPopup && editor && paperRef.current) {
+    const coords = editor.view.coordsAtPos(editor.state.selection.from);
+    const rect = paperRef.current.getBoundingClientRect();
+    atStyle = {
+      left: Math.max(8, Math.min(rect.width - 240, coords.left - rect.left)),
+      top: coords.bottom - rect.top + 6,
+    };
+  }
 
   return (
     <div className="editor-root">
@@ -368,6 +638,9 @@ export default function Editor(props: {
           </span>
         </div>
         <div className="topbar-actions">
+          <button className="ghost-btn" onClick={() => setSearchOpen(true)}>
+            🔍 搜索
+          </button>
           <div className="menu-anchor">
             <button
               className="ghost-btn"
@@ -404,30 +677,101 @@ export default function Editor(props: {
       )}
 
       <div className="editor-body">
-        {book && (
-          <ChapterList
-            chapters={book.chapters}
-            activeId={activeId}
-            onSelect={(id) => void switchChapter(id)}
-            onAdd={() => void addChapter()}
-            onRename={(id, t) => void renameChapter(id, t)}
-            onDelete={(m) => setDeleteTarget(m)}
-            onMove={(id, d) => void moveChapter(id, d)}
-          />
-        )}
+        <Sidebar
+          book={book}
+          activeId={activeId}
+          onSelect={(id) => void switchChapter(id)}
+          onAdd={() => void addChapter()}
+          onRename={(id, t) => void renameChapter(id, t)}
+          onDelete={(m) => setDeleteTarget(m)}
+          onMove={(id, d) => void moveChapter(id, d)}
+          chars={chars}
+          lore={lore}
+          refs={refs}
+          onInspect={setInspector}
+          onNew={(kind) =>
+            setEditing({ entity: kind === 'character' ? ent.newCharacter('') : ent.newLore('') })
+          }
+          onOpenGraph={() => setGraphOpen(true)}
+        />
         <main className="editor-main">
-          <div className="paper">
+          <div className="paper" ref={paperRef}>
             {editorEmpty && <div className="placeholder-hint">落笔无需完美，先写下第一句……</div>}
             <EditorContent editor={editor} />
+            {atPopup && (
+              <div className="at-popup" style={atStyle}>
+                {atPopup.items.map((it, i) => (
+                  <button
+                    key={it.id}
+                    className={'at-item' + (i === atPopup.idx ? ' on' : '')}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      insertAtRef(it, atPopup.anchor);
+                    }}
+                  >
+                    <span className={it.kind === 'character' ? 'tier-badge t-配角' : 'cat-badge c-术语'}>
+                      {it.kind === 'character' ? '人物' : '设定'}
+                    </span>
+                    {it.name}
+                    <span className="entity-sub">{it.sub}</span>
+                  </button>
+                ))}
+                <div className="at-tip">↑↓ 选择 · 回车插入 · Esc 关闭</div>
+              </div>
+            )}
           </div>
           <div className="editor-footer">
             本章 {lib.fmtNum(liveWords)} 字
             {activeMeta && liveWords !== activeMeta.wordCount
               ? '（已存 ' + lib.fmtNum(activeMeta.wordCount) + '）'
               : ''}
+            <span className="footer-hint">正文输入 @ 引用人物/设定 · 点击虚线下划线可转为关联</span>
           </div>
         </main>
+        {inspector && book && (
+          <Inspector
+            target={inspector}
+            chars={chars}
+            lore={lore}
+            refs={refs}
+            book={book}
+            onClose={() => setInspector(null)}
+            onEdit={(e) => setEditing({ entity: e })}
+            onDelete={(t) => void removeEntity(t)}
+            onJumpChapter={(id) => void jumpToChapter(id)}
+            onJumpEntity={setInspector}
+          />
+        )}
       </div>
+
+      {/* 淡提示 → 转关联确认气泡 */}
+      {hintPop && (
+        <>
+          <div className="menu-overlay" onClick={() => setHintPop(null)} />
+          <div className="hint-pop" style={{ left: hintPop.x, top: hintPop.y + 10 }}>
+            <div className="hint-pop-text">
+              识别到「{hintPop.entity.name}」
+              <span className="entity-sub">
+                {(() => {
+                  const e =
+                    hintPop.entity.kind === 'character'
+                      ? chars.find((c) => c.id === hintPop.entity.id)
+                      : lore.find((l) => l.id === hintPop.entity.id);
+                  return e ? ` · 关联到《${e.name}》` : '';
+                })()}
+              </span>
+            </div>
+            <div className="hint-pop-actions">
+              <button className="primary-btn slim" onClick={convertHint}>
+                转为关联
+              </button>
+              <button className="ghost-btn small" onClick={() => setHintPop(null)}>
+                忽略
+              </button>
+            </div>
+          </div>
+        </>
+      )}
 
       {deleteTarget && (
         <Modal title="删除章节" onClose={() => setDeleteTarget(null)}>
@@ -500,6 +844,50 @@ export default function Editor(props: {
             </button>
           </div>
         </Modal>
+      )}
+
+      {editing && editing.entity.type === 'character' && (
+        <CharacterFormModal
+          initial={editing.entity as Character}
+          chars={chars}
+          lore={lore}
+          onSave={(c) => void saveEntity(c)}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing && editing.entity.type === 'lore' && (
+        <LoreFormModal
+          initial={editing.entity as LoreEntry}
+          onSave={(l) => void saveEntity(l)}
+          onClose={() => setEditing(null)}
+        />
+      )}
+
+      {searchOpen && book && (
+        <SearchModal
+          root={root}
+          dirName={dirName}
+          book={book}
+          chars={chars}
+          lore={lore}
+          onClose={() => setSearchOpen(false)}
+          onJumpChapter={(id) => void jumpToChapter(id)}
+          onInspect={(t) => {
+            setSearchOpen(false);
+            setInspector(t);
+          }}
+        />
+      )}
+
+      {graphOpen && (
+        <GraphModal
+          chars={chars}
+          onClose={() => setGraphOpen(false)}
+          onSelect={(id) => {
+            setGraphOpen(false);
+            setInspector({ kind: 'character', id });
+          }}
+        />
       )}
     </div>
   );

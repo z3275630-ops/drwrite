@@ -15,26 +15,18 @@ import {
   deleteFile, deleteDir, copyTree, joinPath, defaultLibraryDir, appSettingsPath, isDesktop,
 } from './fs';
 import { countWords, docToMarkdown, docToPlainText } from './words';
+import { genId, nowIso, todayStr } from './id';
+import { updateRefsForChapter, rebuildAllRefs, readRefs } from './entities';
 
-export function genId(): string {
-  return crypto.randomUUID();
-}
-
-export function nowIso(): string {
-  return new Date().toISOString();
-}
-
-export function todayStr(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
+export { genId, nowIso, todayStr };
 
 function timestampName(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
+
+export { readRefs };
 
 export function safeName(name: string): string {
   return (
@@ -259,6 +251,12 @@ export async function saveChapterWithStats(
   chapter.meta.wordCount = newCount;
   chapter.meta.updatedAt = nowIso();
   await writeChapter(root, dirName, chapter);
+  // 增量更新引用倒排索引（只重扫本章，便宜）
+  try {
+    await updateRefsForChapter(root, dirName, chapter.meta.id, chapter.doc as JsonValue);
+  } catch {
+    // 索引失败不影响正文保存
+  }
 
   const next: Book = { ...book, chapters: book.chapters.map((c) => (c.id === chapter.meta.id ? { ...c, ...chapter.meta } : c)) };
   if (diff > 0) {
@@ -322,6 +320,16 @@ export async function restoreSnapshot(
   await deleteDir(joinPath(bookDir, 'chapters'));
   await copyTree(joinPath(snapDir, 'chapters'), joinPath(bookDir, 'chapters'));
   await writeJson(bookPathOf(root, dirName), snapBook);
+  // 全量重建引用索引
+  const snapChapters = ((snapBook as { chapters?: { id: string }[] }).chapters ?? []).map((c) => c.id);
+  try {
+    await rebuildAllRefs(root, dirName, snapChapters.map((id) => ({ id })), async (id) => {
+      const f = await readChapter(root, dirName, id);
+      return (f?.doc as JsonValue) ?? null;
+    });
+  } catch {
+    // 索引失败不影响恢复
+  }
 }
 
 /* ---------- 导出 ---------- */
