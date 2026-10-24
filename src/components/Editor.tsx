@@ -5,7 +5,11 @@ import type { Editor as TipTapEditor } from '@tiptap/react';
 import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, RefIndexEntry } from '../types';
 import { MODEL_VERSION } from '../types';
 import type { JsonValue } from '../lib/json';
-import { countWords } from '../lib/words';
+import { countWords, docToPlainText } from '../lib/words';
+import { loadAiConfig, callAi } from '../lib/ai';
+import type { AiConfig } from '../lib/ai';
+import { buildAiMessages, TASK_LABELS } from '../lib/assembler';
+import type { AiTaskKind } from '../lib/assembler';
 import * as lib from '../lib/library';
 import { cnNum } from '../lib/cnnum';
 import {
@@ -22,6 +26,9 @@ import Inspector from './Inspector';
 import { CharacterFormModal, LoreFormModal } from './EntityForms';
 import SearchModal from './SearchModal';
 import GraphModal from './GraphModal';
+import AiSettingsModal from './AiSettingsModal';
+import ProposalModal from './ProposalModal';
+import type { ProposalState } from './ProposalModal';
 import type { EntityTarget } from './types';
 
 const p2 = (n: number) => String(n).padStart(2, '0');
@@ -79,6 +86,15 @@ export default function Editor(props: {
   const [hintPop, setHintPop] = useState<HintPop | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
+
+  /* ---------- AI 状态 ---------- */
+  const [aiCfg, setAiCfg] = useState<AiConfig | null>(null);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [selMenu, setSelMenu] = useState<{ x: number; y: number } | null>(null);
+  const [selCustom, setSelCustom] = useState('');
+  const [proposal, setProposal] = useState<ProposalState | null>(null);
+  const pendingAiRef = useRef<{ kind: AiTaskKind; custom?: string; range?: { from: number; to: number } } | null>(null);
+  const rerunAiRef = useRef<(() => void) | null>(null);
 
   const dirtyRef = useRef(false);
   const timerRef = useRef<number | undefined>(undefined);
@@ -565,6 +581,131 @@ export default function Editor(props: {
     }
   };
 
+  /* ---------- AI：任务执行 / 提案应用 ---------- */
+
+  useEffect(() => {
+    void loadAiConfig().then(setAiCfg);
+  }, []);
+
+  /** 正文右键：有选区才弹 AI 菜单，没有就放行系统菜单（拼写/粘贴） */
+  const onPaperContextMenu = (e: React.MouseEvent) => {
+    if (!editor) return;
+    const { empty } = editor.state.selection;
+    if (empty) {
+      setSelMenu(null);
+      return;
+    }
+    e.preventDefault();
+    setSelCustom('');
+    setSelMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const hostOf = (url: string): string => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  };
+
+  const runAiTask = (kind: AiTaskKind, custom?: string) => {
+    setSelMenu(null);
+    if (!aiCfg) {
+      setAiSettingsOpen(true);
+      toast('先把 AI 配置好（填你自己的密钥）', 'err');
+      return;
+    }
+    if (!editor || !book || !activeId) return;
+    const meta = book.chapters.find((c) => c.id === activeId);
+    if (!meta) return;
+
+    let range: { from: number; to: number } | undefined;
+    let selection: string | undefined;
+    if (kind !== 'continue') {
+      const { from, to, empty } = editor.state.selection;
+      if (empty) {
+        toast('先选中一段文字再操作', 'err');
+        return;
+      }
+      range = { from, to };
+      selection = editor.state.doc.textBetween(from, to, '\n');
+    }
+    const fullText = editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n');
+    const chapterTail = range
+      ? editor.state.doc.textBetween(0, range.from, '\n')
+      : fullText;
+    const relatedIds = [...new Set(refs.filter((r) => r.chapterId === activeId).map((r) => r.targetId))];
+
+    pendingAiRef.current = { kind, custom, range };
+    const cfg = aiCfg;
+
+    const runOnce = () => {
+      setProposal({
+        phase: 'loading',
+        title: TASK_LABELS[kind] + (kind === 'custom' && custom ? '：' + clipText(custom, 12) : ''),
+        modelTag: cfg.model + ' @ ' + hostOf(cfg.baseUrl),
+        startedAt: Date.now(),
+        original: selection,
+      });
+      void (async () => {
+        try {
+          let prevTail: string | undefined;
+          if (kind === 'continue' && meta.index > 0) {
+            const prev = book.chapters[meta.index - 1];
+            const pf = await lib.readChapter(root, dirName, prev.id);
+            prevTail = pf ? docToPlainText(pf.doc as never).slice(-500) : undefined;
+          }
+          const messages = buildAiMessages(
+            { book, chapter: meta, chapterTail, prevChapterTail: prevTail, selection, relatedIds, kind, custom },
+            chars,
+            lore
+          );
+          const maxTokens =
+            kind === 'continue' ? 1500 : Math.min(2200, Math.max(400, Math.round((selection?.length ?? 200) * 3)));
+          const r = await callAi(cfg, messages, { maxTokens, temperature: kind === 'continue' ? 0.9 : 0.7 });
+          setProposal((p) =>
+            p
+              ? {
+                  ...p,
+                  phase: 'done',
+                  aiText: r.text,
+                  usage: `输入约 ${r.promptTokens ?? '?'} / 输出 ${r.completionTokens ?? '?'} tokens`,
+                }
+              : p
+          );
+        } catch (e) {
+          setProposal((p) =>
+            p ? { ...p, phase: 'error', error: String(e instanceof Error ? e.message : e) } : p
+          );
+        }
+      })();
+    };
+    rerunAiRef.current = runOnce;
+    runOnce();
+  };
+
+  const applyProposal = () => {
+    const p = proposal;
+    const t = pendingAiRef.current;
+    if (!p?.aiText || !editor || !t) return;
+    const paras = p.aiText
+      .split(/\n+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => ({ type: 'paragraph', content: [{ type: 'text', text: s }] }));
+    if (!paras.length) {
+      toast('AI 没有产出可用文字', 'err');
+      return;
+    }
+    if (t.kind === 'continue') {
+      editor.chain().focus('end').insertContentAt(editor.state.doc.content.size, paras as never).run();
+    } else if (t.range) {
+      editor.chain().focus().insertContentAt({ from: t.range.from, to: t.range.to }, paras as never).run();
+    }
+    setProposal(null);
+    toast('已应用到正文，Ctrl+Z 可整段撤销');
+  };
+
   /* ---------- 顶栏渲染 ---------- */
 
   const today = book ? lib.todayWords(book) : 0;
@@ -695,7 +836,7 @@ export default function Editor(props: {
           onOpenGraph={() => setGraphOpen(true)}
         />
         <main className="editor-main">
-          <div className="paper" ref={paperRef}>
+          <div className="paper" ref={paperRef} onContextMenu={onPaperContextMenu}>
             {editorEmpty && <div className="placeholder-hint">落笔无需完美，先写下第一句……</div>}
             <EditorContent editor={editor} />
             {atPopup && (
@@ -721,11 +862,25 @@ export default function Editor(props: {
             )}
           </div>
           <div className="editor-footer">
-            本章 {lib.fmtNum(liveWords)} 字
-            {activeMeta && liveWords !== activeMeta.wordCount
-              ? '（已存 ' + lib.fmtNum(activeMeta.wordCount) + '）'
-              : ''}
-            <span className="footer-hint">正文输入 @ 引用人物/设定 · 点击虚线下划线可转为关联</span>
+            <span>
+              本章 {lib.fmtNum(liveWords)} 字
+              {activeMeta && liveWords !== activeMeta.wordCount
+                ? '（已存 ' + lib.fmtNum(activeMeta.wordCount) + '）'
+                : ''}
+              <span className="footer-hint">选中文字右键唤起 AI · 输入 @ 引用 · 点虚线转关联</span>
+            </span>
+            <span className="footer-actions">
+              <button
+                className={'ghost-btn small' + (aiCfg ? '' : ' off')}
+                title={aiCfg ? '接着本章结尾继续写' : '先配置 AI'}
+                onClick={() => runAiTask('continue')}
+              >
+                ✦ AI 续写
+              </button>
+              <button className="ghost-btn small" onClick={() => setAiSettingsOpen(true)}>
+                ⚙ AI{aiCfg ? '' : '·未配置'}
+              </button>
+            </span>
           </div>
         </main>
         {inspector && book && (
@@ -889,6 +1044,69 @@ export default function Editor(props: {
           }}
         />
       )}
+
+      {aiSettingsOpen && (
+        <AiSettingsModal
+          initial={aiCfg}
+          onClose={() => setAiSettingsOpen(false)}
+          onSaved={(cfg) => {
+            setAiCfg(cfg);
+            setAiSettingsOpen(false);
+          }}
+        />
+      )}
+
+      {/* 选中文字后的 AI 右键菜单 */}
+      {selMenu && (
+        <>
+          <div className="menu-overlay" onClick={() => setSelMenu(null)} />
+          <div
+            className="sel-menu"
+            style={{ left: Math.min(selMenu.x, window.innerWidth - 260), top: Math.min(selMenu.y, window.innerHeight - 240) }}
+          >
+            <button className="sel-act" onClick={() => runAiTask('rewrite')}>
+              ✎ 改写
+            </button>
+            <button className="sel-act" onClick={() => runAiTask('expand')}>
+              ⇱ 扩写
+            </button>
+            <button className="sel-act" onClick={() => runAiTask('shorten')}>
+              ⇲ 缩写
+            </button>
+            <button className="sel-act" onClick={() => runAiTask('polish')}>
+              ✧ 润色
+            </button>
+            <div className="menu-sep" />
+            <input
+              className="sel-custom"
+              placeholder="自定义要求，如：改成第一人称"
+              value={selCustom}
+              autoFocus
+              onChange={(e) => setSelCustom(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && selCustom.trim()) runAiTask('custom', selCustom.trim());
+              }}
+            />
+            <button
+              className="sel-act custom-go"
+              disabled={!selCustom.trim()}
+              onClick={() => runAiTask('custom', selCustom.trim())}
+            >
+              按要求处理 →
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* AI 提案确认卡 */}
+      {proposal && (
+        <ProposalModal
+          state={proposal}
+          onApply={applyProposal}
+          onRegenerate={() => rerunAiRef.current?.()}
+          onClose={() => setProposal(null)}
+        />
+      )}
     </div>
   );
 }
@@ -898,4 +1116,8 @@ function formatSnapName(name: string): string {
   const m = name.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
   if (!m) return name;
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+
+function clipText(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n) + '…' : s;
 }

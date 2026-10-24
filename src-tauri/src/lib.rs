@@ -116,6 +116,68 @@ fn app_settings_path(app: tauri::AppHandle) -> Result<String, String> {
     Ok(dir.join("settings.json").to_string_lossy().into_owned())
 }
 
+/* ---------- AI 网关（OpenAI 兼容 /chat/completions） ---------- */
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AiMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiChatArgs {
+    base_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<AiMessage>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+}
+
+/// 在 Rust 侧直连模型接口：不受 WebView CORS 限制，Ollama 这类本地端点也能用。
+/// 异步命令跑在线程池上，阻塞等待不会卡界面。
+#[tauri::command]
+async fn ai_chat(args: AiChatArgs) -> Result<Value, String> {
+    let url = format!("{}/chat/completions", args.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": args.model,
+        "messages": args.messages,
+        "max_tokens": args.max_tokens.unwrap_or(2048),
+        "temperature": args.temperature.unwrap_or(0.8),
+        "stream": false,
+    });
+    let req = ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(180))
+        .set("Authorization", format!("Bearer {}", args.api_key).as_str());
+    let resp = match req.send_json(body) {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let detail = r.into_string().unwrap_or_default();
+            return Err(format!("接口返回 {}：{}", code, shorten(&detail, 300)));
+        }
+        Err(e) => {
+            return Err(format!(
+                "连接失败（检查地址与网络）：{}",
+                shorten(&e.to_string(), 200)
+            ))
+        }
+    };
+    resp.into_json::<Value>().map_err(|e| format!("响应解析失败：{}", e))
+}
+
+fn shorten(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut cut = max;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &s[..cut])
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -131,7 +193,8 @@ pub fn run() {
             delete_dir,
             copy_tree,
             default_library_dir,
-            app_settings_path
+            app_settings_path,
+            ai_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
