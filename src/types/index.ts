@@ -128,8 +128,10 @@ export interface ChapterMeta {
   updatedAt: string;
 }
 
+import type { JsonValue } from '../lib/json';
+
 /**
- * 章节文件：chapters/第0001章.json
+ * 章节文件：chapters/<chapterId>.json
  * doc 为 Tiptap JSON，自定义 mark：
  *  - entityRef → EntityRef（点击预览、AI 装配上下文）
  *  - sceneAnchor / povMark → P1 结构化标记（先占名）
@@ -137,7 +139,7 @@ export interface ChapterMeta {
 export interface ChapterFile {
   protocolVersion: number;
   meta: ChapterMeta;
-  doc: unknown; // Tiptap JSONDocument
+  doc: JsonValue; // Tiptap JSONDocument
 }
 
 /* ---------- 书 ---------- */
@@ -157,6 +159,8 @@ export interface Book {
   dailyGoal?: number;
   createdAt: string;
   updatedAt: string;
+  /** 章节目录（顺序即目录顺序；正文在 chapters/<id>.json） */
+  chapters: ChapterMeta[];
   /** 派生统计 */
   stats: {
     totalWords: number;
