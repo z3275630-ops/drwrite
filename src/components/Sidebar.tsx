@@ -1,10 +1,11 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import type { Character, ChapterMeta, LoreEntry, RefIndexEntry, CharacterTier, LoreCategory } from '../types';
 import ChapterList from './ChapterList';
 import { TIERS, LORE_CATEGORIES, aliasMatch, refChapters } from '../lib/entities';
 import type { EntityTarget } from './types';
 
-type Tab = 'chapters' | 'chars' | 'lore';
+type Tab = 'chapters' | 'chars' | 'lore' | 'structure';
 
 export default function Sidebar(props: {
   book: { chapters: ChapterMeta[] } | null;
@@ -20,6 +21,7 @@ export default function Sidebar(props: {
   onInspect: (t: EntityTarget) => void;
   onNew: (kind: 'character' | 'lore') => void;
   onOpenGraph: () => void;
+  structure?: ReactNode;
 }) {
   const [tab, setTab] = useState<Tab>('chapters');
   const [charQuery, setCharQuery] = useState('');
@@ -46,9 +48,14 @@ export default function Sidebar(props: {
         <button className={tab === 'lore' ? 'on' : ''} onClick={() => setTab('lore')}>
           设定{props.lore.length ? ` ${props.lore.length}` : ''}
         </button>
+        <button className={tab === 'structure' ? 'on' : ''} onClick={() => setTab('structure')}>
+          结构
+        </button>
       </div>
 
-      {tab === 'chapters' ? (
+      {tab === 'structure' ? (
+        props.structure ?? null
+      ) : tab === 'chapters' ? (
         props.book && (
           <ChapterList
             chapters={props.book.chapters}

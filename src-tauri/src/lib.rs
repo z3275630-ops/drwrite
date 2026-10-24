@@ -133,6 +133,7 @@ struct AiChatArgs {
     messages: Vec<AiMessage>,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    effort: Option<String>,
 }
 
 /// 在 Rust 侧直连模型接口：不受 WebView CORS 限制，Ollama 这类本地端点也能用。
@@ -140,13 +141,16 @@ struct AiChatArgs {
 #[tauri::command]
 async fn ai_chat(args: AiChatArgs) -> Result<Value, String> {
     let url = format!("{}/chat/completions", args.base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": args.model,
         "messages": args.messages,
         "max_tokens": args.max_tokens.unwrap_or(2048),
         "temperature": args.temperature.unwrap_or(0.8),
         "stream": false,
     });
+    if let Some(effort) = &args.effort {
+        body["effort"] = serde_json::Value::String(effort.clone());
+    }
     let req = ureq::post(&url)
         .timeout(std::time::Duration::from_secs(180))
         .set("Authorization", format!("Bearer {}", args.api_key).as_str());

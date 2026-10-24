@@ -29,7 +29,13 @@ import GraphModal from './GraphModal';
 import AiSettingsModal from './AiSettingsModal';
 import ProposalModal from './ProposalModal';
 import type { ProposalState } from './ProposalModal';
+import StructureTab from './StructureTab';
 import type { EntityTarget } from './types';
+import type { Foreshadow } from '../types';
+import type { TimelineData } from '../lib/structure';
+import * as st from '../lib/structure';
+import { entityCardLines } from '../lib/assembler';
+import { writeText, joinPath, isDesktop } from '../lib/fs';
 
 const p2 = (n: number) => String(n).padStart(2, '0');
 
@@ -95,6 +101,11 @@ export default function Editor(props: {
   const [proposal, setProposal] = useState<ProposalState | null>(null);
   const pendingAiRef = useRef<{ kind: AiTaskKind; custom?: string; range?: { from: number; to: number } } | null>(null);
   const rerunAiRef = useRef<(() => void) | null>(null);
+
+  /* ---------- P3：时间线 / 伏笔 / AI 巡检 ---------- */
+  const [timeline, setTimeline] = useState<TimelineData>({ lanes: [], events: [] });
+  const [foreshadows, setForeshadows] = useState<Foreshadow[]>([]);
+  const [aiReport, setAiReport] = useState<{ phase: 'loading' | 'done' | 'error'; text?: string; error?: string } | null>(null);
 
   const dirtyRef = useRef(false);
   const timerRef = useRef<number | undefined>(undefined);
@@ -324,7 +335,89 @@ export default function Editor(props: {
     ]);
     setChars(cs);
     setLore(ls);
+    setTimeline(await st.loadTimeline(root, dirName));
+    setForeshadows(await st.loadForeshadows(root, dirName));
   }, [root, dirName]);
+
+  const persistTimeline = useCallback(
+    async (t: TimelineData) => {
+      setTimeline(t);
+      await st.saveTimeline(root, dirName, t);
+    },
+    [root, dirName]
+  );
+
+  const persistForeshadows = useCallback(
+    async (list: Foreshadow[]) => {
+      setForeshadows(list);
+      await st.saveForeshadows(root, dirName, list);
+    },
+    [root, dirName]
+  );
+
+  /** AI 巡检：把设定卡 + 伏笔清单 + 本章正文交给模型，找硬冲突与存疑项 */
+  const runConsistencyCheck = async () => {
+    if (!aiCfg) {
+      setAiSettingsOpen(true);
+      toast('先配置 AI 再巡检', 'err');
+      return;
+    }
+    if (!book || !activeId || !editor) return;
+    const meta = book.chapters.find((c) => c.id === activeId);
+    if (!meta) return;
+    setAiReport({ phase: 'loading' });
+    try {
+      const chapterText = editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n').slice(0, 8000);
+      const cards = entityCardLines(chars, lore, [
+        ...new Set(refs.filter((r) => r.chapterId === activeId).map((r) => r.targetId)),
+      ]);
+      const fores = foreshadows
+        .map((f) => `· ${f.title}（${st.foreshadowStateOf(f, book.chapters)}；埋于${f.plantAnchors.map((a) => (book.chapters.find((c) => c.id === a.chapterId)?.index ?? 0) + 1).join('、')}章${f.payoffAnchor ? '，已回收' : ''}）`)
+        .slice(0, 20);
+      const parts = [
+        `【作品】《${book.title}》第${meta.index + 1}章 ${meta.title}`,
+        cards.length ? '【设定资料】\n' + cards.join('\n') : '',
+        fores.length ? '【伏笔清单】\n' + fores.join('\n') : '',
+        '【本章正文】\n' + chapterText,
+        '【任务】你是连载小说的连续性审校。找出本章与设定资料、伏笔清单之间的硬冲突（时间线错乱、人物设定矛盾、地点/势力张冠李戴、已回收伏笔再次出现等）和存疑项（称呼不一致、疑似遗忘的伏笔）。只报告有依据的问题，每条格式：〔硬冲突/存疑〕问题描述（引用相关原文片段）。没有问题就明确说"未发现明显冲突"。不要改写正文。',
+      ].filter(Boolean);
+      const r = await callAi(aiCfg, [{ role: 'user', content: parts.join('\n\n') }], {
+        maxTokens: 4000,
+        temperature: 0.3,
+      });
+      setAiReport({ phase: 'done', text: r.text });
+    } catch (e) {
+      setAiReport({ phase: 'error', error: String(e instanceof Error ? e.message : e) });
+    }
+  };
+
+  /** 分章导出：每章一个 TXT，存进所选文件夹（网文平台连载用） */
+  const exportChaptersToFolder = async () => {
+    setMenu(null);
+    if (!book) return;
+    if (!isDesktop) {
+      toast('浏览器预览模式不支持选文件夹，请用桌面版', 'err');
+      return;
+    }
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const dir = await open({ directory: true, title: '选择导出位置（每章一个 TXT）' });
+    if (typeof dir !== 'string') return;
+    try {
+      await flushSave();
+      let n = 0;
+      for (const m of book.chapters) {
+        const f = await lib.readChapter(root, dirName, m.id);
+        if (!f) continue;
+        const body = docToPlainText(f.doc as never);
+        const name = `第${m.index + 1}章 ${lib.safeName(m.title)}.txt`;
+        await writeText(joinPath(dir, name), `第${m.index + 1}章 ${m.title}\n\n${body}\n`);
+        n++;
+      }
+      toast(`已导出 ${n} 个 TXT 文件`);
+    } catch (e) {
+      toast('导出失败：' + String(e), 'err');
+    }
+  };
 
   useEffect(() => {
     void (async () => {
@@ -795,6 +888,7 @@ export default function Editor(props: {
                 <div className="menu-panel">
                   <button onClick={() => void doExport('md', 'all')}>全书 · Markdown</button>
                   <button onClick={() => void doExport('txt', 'all')}>全书 · 纯文本 TXT</button>
+                  <button onClick={() => void exportChaptersToFolder()}>分章 TXT（每章一个文件）</button>
                   <div className="menu-sep" />
                   <button onClick={() => void doExport('md', 'current')} disabled={!activeId}>
                     本章 · Markdown
@@ -834,6 +928,21 @@ export default function Editor(props: {
             setEditing({ entity: kind === 'character' ? ent.newCharacter('') : ent.newLore('') })
           }
           onOpenGraph={() => setGraphOpen(true)}
+          structure={
+            book ? (
+              <StructureTab
+                book={book}
+                timeline={timeline}
+                foreshadows={foreshadows}
+                chars={chars}
+                lore={lore}
+                onTimelineChange={(t) => void persistTimeline(t)}
+                onForeshadowsChange={(f) => void persistForeshadows(f)}
+                onJumpChapter={(id) => void jumpToChapter(id)}
+                onConsistencyCheck={() => void runConsistencyCheck()}
+              />
+            ) : null
+          }
         />
         <main className="editor-main">
           <div className="paper" ref={paperRef} onContextMenu={onPaperContextMenu}>
@@ -1106,6 +1215,35 @@ export default function Editor(props: {
           onRegenerate={() => rerunAiRef.current?.()}
           onClose={() => setProposal(null)}
         />
+      )}
+
+      {/* AI 巡检报告 */}
+      {aiReport && (
+        <Modal title="AI 一致性巡检" width={640} onClose={() => setAiReport(null)}>
+          {aiReport.phase === 'loading' && (
+            <div className="prop-loading">
+              <div className="prop-shimmer" />
+              <div className="prop-shimmer short" />
+              <p className="hint-text">正在通读本章与设定资料……</p>
+            </div>
+          )}
+          {aiReport.phase === 'error' && (
+            <div className="prop-error">
+              <p>{aiReport.error}</p>
+            </div>
+          )}
+          {aiReport.phase === 'done' && <div className="report-text">{aiReport.text}</div>}
+          <div className="modal-actions">
+            <button className="ghost-btn" onClick={() => setAiReport(null)}>
+              关闭
+            </button>
+            {aiReport.phase === 'error' && (
+              <button className="primary-btn" onClick={() => void runConsistencyCheck()}>
+                重试
+              </button>
+            )}
+          </div>
+        </Modal>
       )}
     </div>
   );

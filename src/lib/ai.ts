@@ -58,19 +58,24 @@ export async function callAi(
   messages: AiMessage[],
   opts?: { maxTokens?: number; temperature?: number; timeoutMs?: number }
 ): Promise<AiResult> {
+  // DeepSeek 的思考型模型：默认高努力会烧大量 token 在推理上，写作任务用 low 足够
+  const effort = /deepseek/i.test(cfg.baseUrl) ? 'low' : undefined;
+  const maxTokens = Math.max(800, opts?.maxTokens ?? 2048);
   const payload = {
     model: cfg.model,
     messages,
-    max_tokens: opts?.maxTokens ?? 2048,
+    max_tokens: maxTokens,
     temperature: opts?.temperature ?? 0.8,
     stream: false,
+    ...(effort ? { effort } : {}),
   };
 
   let data: JsonValue;
+  let usedMax = maxTokens;
   if (isDesktop) {
     const { invoke } = await import('@tauri-apps/api/core');
     data = await invoke<JsonValue>('ai_chat', {
-      args: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, messages, maxTokens: opts?.maxTokens, temperature: opts?.temperature },
+      args: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, messages, maxTokens, temperature: opts?.temperature, effort },
     });
   } else {
     const ctrl = new AbortController();
@@ -102,15 +107,36 @@ export async function callAi(
     }
   }
 
-  const obj = data as { choices?: { message?: { content?: string } }[]; error?: { message?: string }; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  const obj = toObj(data);
   if (obj.error) throw new Error(obj.error.message ?? '接口返回错误');
-  const text = obj.choices?.[0]?.message?.content;
-  if (typeof text !== 'string') throw new Error('接口返回里没有正文内容');
+  const choice = obj.choices?.[0];
+  const content = choice?.message?.content;
+  const finish = choice?.finish_reason;
+  const reasoning = choice?.message?.reasoning_content;
+
+  // 思考型模型可能把预算全烧在推理上（content 空 + length）：自动加码重试一次
+  if (typeof content !== 'string' || !content.trim()) {
+    if (finish === 'length' && reasoning && usedMax < 8000) {
+      return callAi(cfg, messages, {
+        ...opts,
+        maxTokens: Math.min(8000, Math.max(3000, usedMax * 3)),
+      });
+    }
+    throw new Error('模型没有产出正文（可能被思考耗尽预算），请重试或换非思考型模型');
+  }
   return {
-    text: text.trim(),
+    text: content.trim(),
     promptTokens: obj.usage?.prompt_tokens,
     completionTokens: obj.usage?.completion_tokens,
   };
+}
+
+function toObj(data: JsonValue): {
+  choices?: { message?: { content?: string; reasoning_content?: string }; finish_reason?: string }[];
+  error?: { message?: string };
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+} {
+  return data as ReturnType<typeof toObj>;
 }
 
 function friendlyHttpError(status: number, body: string): string {
