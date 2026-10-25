@@ -1,6 +1,6 @@
 [package]
 name = "drwrite"
-version = "0.1.0"
+version = "0.6.0"
 description = "Drwrite —— 给长篇小说作者的本地写作台"
 edition = "2021"
 
