@@ -771,8 +771,8 @@ input {
 
 .novel-doc {
   font-family: var(--font-serif);
-  font-size: 17.5px;
-  line-height: 2.05;
+  font-size: var(--doc-fs, 17.5px);
+  line-height: var(--doc-lh, 2.05);
   color: var(--ink);
   letter-spacing: 0.02em;
   outline: none;
@@ -1934,4 +1934,333 @@ body[data-theme='dark'] .modal-card .field input {
 .footer-hint {
   margin-left: 14px;
   opacity: 0.75;
+}
+
+/* ============ P5：专注模式 ============ */
+
+.editor-root.zen .sidebar,
+.editor-root.zen .inspector {
+  display: none;
+}
+.editor-root.zen .goal-bar {
+  display: none;
+}
+.editor-root.zen .topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  transform: translateY(-100%);
+  opacity: 0.96;
+  transition: transform 0.25s ease;
+}
+.editor-root.zen .topbar:hover {
+  transform: none;
+}
+.editor-root.zen .editor-footer {
+  opacity: 0.25;
+  transition: opacity 0.2s;
+}
+.editor-root.zen .editor-footer:hover {
+  opacity: 1;
+}
+.zen-exit {
+  position: fixed;
+  right: 18px;
+  bottom: 14px;
+  z-index: 45;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  opacity: 0.55;
+  transition: all 0.15s;
+}
+.zen-exit:hover {
+  opacity: 1;
+  color: var(--accent-deep);
+  border-color: var(--accent);
+}
+
+/* ============ P5：分卷 / 拖拽排序 ============ */
+
+.chapter-list-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.vol-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.vol-group {
+  margin-bottom: 4px;
+}
+
+.vol-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 5px;
+  margin-top: 6px;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 6px 6px 0 0;
+}
+.vol-head.drag-over {
+  background: var(--accent-wash);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.vol-title {
+  font-family: var(--font-serif);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vol-count {
+  font-size: 10.5px;
+  color: var(--muted);
+  flex: none;
+}
+.vol-ops {
+  display: none;
+  gap: 2px;
+  margin-left: auto;
+}
+.vol-head:hover .vol-ops {
+  display: flex;
+}
+.vol-ops .op {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.vol-ops .op:hover {
+  background: rgba(160, 106, 60, 0.14);
+  color: var(--accent-deep);
+}
+.vol-ops .op.danger:hover {
+  background: rgba(176, 74, 58, 0.12);
+  color: var(--danger);
+}
+.vol-empty {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 12px 6px;
+  opacity: 0.8;
+}
+
+.chapter-item[draggable='true'] {
+  cursor: grab;
+}
+.chapter-item.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.chapter-item.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.vol-new-input {
+  margin: 0 10px 12px;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  outline: none;
+  background: var(--panel);
+}
+.add-vol {
+  margin: 0 10px 12px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  padding: 4px 6px;
+  text-align: left;
+}
+.add-vol:hover {
+  color: var(--accent-deep);
+}
+
+.has-outline {
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--accent-deep);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1.5px 3px;
+  vertical-align: 2px;
+}
+
+/* ============ P5：剧情总览卡 ============ */
+
+.plot-card {
+  margin: 10px 10px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+.plot-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.plot-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  letter-spacing: 0.05em;
+}
+.plot-text {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--ink-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.plot-text.empty {
+  color: var(--muted);
+}
+.plot-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* ============ P5：排版设置 / 素材箱 / 流式 ============ */
+
+.font-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.font-label {
+  font-size: 12.5px;
+  color: var(--muted);
+  width: 64px;
+  flex: none;
+}
+.font-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+.font-val {
+  font-size: 12px;
+  color: var(--ink-soft);
+  width: 52px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.font-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+.font-toggle input {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+}
+.font-preview {
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 4px;
+  background: var(--panel-2);
+  user-select: text;
+}
+
+.note-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+.note-input-row .syn-area {
+  flex: 1;
+}
+.note-search {
+  width: 100%;
+  margin-bottom: 8px;
+}
+.note-list {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.note-item {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  padding: 8px 12px;
+  background: var(--panel);
+}
+.note-text {
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  user-select: text;
+}
+.note-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 5px;
+}
+.note-ops {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.prop-text.stream {
+  max-height: 320px;
+}
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 2px;
+  vertical-align: -2px;
+  animation: caretBlink 0.9s step-end infinite;
+}
+@keyframes caretBlink {
+  50% {
+    opacity: 0;
+  }
+}
+.typing-dots {
+  animation: fadeIn 0.8s ease infinite alternate;
+}
+.outline-area {
+  min-height: 200px;
+  font-size: 13px;
 }

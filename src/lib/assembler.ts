@@ -59,6 +59,10 @@ export interface AssembleInput {
   chapterTail: string;
   prevChapterTail?: string;
   prevSynopsis?: string;
+  /** 全书滚动摘要（P5）：百万字长跑时的长期记忆 */
+  plotSummary?: string;
+  /** 本章章纲（P5）：动笔前定下的要点 */
+  outline?: string;
   selection?: string;
   /** 相关实体（本章出场） */
   relatedIds: string[];
@@ -81,9 +85,11 @@ export function buildAiMessages(input: AssembleInput, chars: Character[], lore: 
 
   const parts: string[] = [];
   parts.push(`【作品】《${input.book.title}》`);
+  if (input.plotSummary) parts.push('【剧情总览（截至前文）】\n' + input.plotSummary);
   const cards = entityCardLines(chars, lore, input.relatedIds);
   if (cards.length) parts.push('【设定资料】\n' + cards.join('\n'));
   parts.push(`【本章】第${input.chapter.index + 1}章 ${input.chapter.title}${input.chapter.synopsis ? '：' + clip(input.chapter.synopsis, 100) : ''}`);
+  if (input.outline) parts.push('【本章章纲（按要点推进情节）】\n' + clip(input.outline, 900));
   if (input.prevSynopsis) parts.push('【上一章梗概】' + clip(input.prevSynopsis, 150));
   if (input.prevChapterTail) parts.push('【上一章结尾】\n' + clip(input.prevChapterTail, 600));
   if (input.chapterTail) parts.push('【本章前文】\n' + clip(input.chapterTail, input.kind === 'continue' ? 2000 : 1200));

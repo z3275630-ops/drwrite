@@ -122,6 +122,10 @@ export interface ChapterMeta {
   title: string;
   /** 本章意图/梗概 —— 手写字段，AI 永不覆盖 */
   synopsis?: string;
+  /** 本章章纲（P5）：动笔前的要点清单，续写时随身带上 */
+  outline?: string;
+  /** 所属卷（P5）：指向 Book.volumes[].id；缺省 = 未分卷 */
+  volumeId?: string;
   povCharacterId?: EntityId;
   wordCount: number; // 派生缓存
   createdAt: string;
@@ -149,6 +153,12 @@ export interface DailyStats {
   words: number;
 }
 
+/** 卷（P5）：纯分组容器，只存 id 和名字 */
+export interface Volume {
+  id: string;
+  title: string;
+}
+
 export interface Book {
   id: string;
   protocolVersion: number;
@@ -159,8 +169,17 @@ export interface Book {
   dailyGoal?: number;
   createdAt: string;
   updatedAt: string;
+  /** 卷目录（P5）：顺序即展示顺序 */
+  volumes?: Volume[];
   /** 章节目录（顺序即目录顺序；正文在 chapters/<id>.json） */
   chapters: ChapterMeta[];
+  /** 剧情总览（P5）：全书的滚动摘要，AI 续写/章纲随身携带的长记忆 */
+  plotSummary?: string;
+  /** 总览已覆盖到第几章（chapter.index < plotSummaryUpto 视为已并入） */
+  plotSummaryUpto?: number;
+  plotSummaryAt?: string;
+  /** 最近一次自动快照的日期（YYYY-MM-DD），每天首存触发一次 */
+  lastAutoSnapshot?: string;
   /** 派生统计 */
   stats: {
     totalWords: number;

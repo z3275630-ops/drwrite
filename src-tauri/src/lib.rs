@@ -170,6 +170,104 @@ async fn ai_chat(args: AiChatArgs) -> Result<Value, String> {
     resp.into_json::<Value>().map_err(|e| format!("响应解析失败：{}", e))
 }
 
+/// 流式对话补全：SSE 逐块读，把增量经 Channel 推给前端，结束返回汇总。
+/// 事件格式（JSON 字符串）：{"t":"c","v":"全文sofar"} 正文；{"t":"r","n":字数} 思考进度；
+/// 最后 invoke 返回 {"content":..,"finish_reason":..,"usage":..,"reasoning_chars":..}
+#[tauri::command]
+async fn ai_chat_stream(
+    args: AiChatArgs,
+    on_event: tauri::ipc::Channel<String>,
+) -> Result<Value, String> {
+    use std::io::BufRead;
+
+    let url = format!("{}/chat/completions", args.base_url.trim_end_matches('/'));
+    let mut body = serde_json::json!({
+        "model": args.model,
+        "messages": args.messages,
+        "max_tokens": args.max_tokens.unwrap_or(2048),
+        "temperature": args.temperature.unwrap_or(0.8),
+        "stream": true,
+    });
+    if let Some(effort) = &args.effort {
+        body["effort"] = serde_json::Value::String(effort.clone());
+    }
+    // 只限连接与单次读取超时，不限总时长：流式响应可能持续几分钟
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(120))
+        .build();
+    let req = agent
+        .post(&url)
+        .set("Authorization", format!("Bearer {}", args.api_key).as_str());
+    let resp = match req.send_json(body) {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let detail = r.into_string().unwrap_or_default();
+            return Err(format!("接口返回 {}：{}", code, shorten(&detail, 300)));
+        }
+        Err(e) => {
+            return Err(format!(
+                "连接失败（检查地址与网络）：{}",
+                shorten(&e.to_string(), 200)
+            ))
+        }
+    };
+
+    let reader = resp.into_reader();
+    let mut buf = std::io::BufReader::new(reader);
+    let mut line = String::new();
+    let mut content = String::new();
+    let mut reasoning_chars: usize = 0;
+    let mut finish: Option<String> = None;
+    let mut usage = serde_json::json!({});
+
+    loop {
+        line.clear();
+        let n = buf.read_line(&mut line).map_err(|e| format!("读取中断：{}", e))?;
+        if n == 0 {
+            break;
+        }
+        let l = line.trim();
+        if !l.starts_with("data:") {
+            continue;
+        }
+        let payload = l[5..].trim();
+        if payload == "[DONE]" {
+            break;
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        if let Some(choice) = chunk["choices"].get(0) {
+            if let Some(d) = choice["delta"]["content"].as_str() {
+                if !d.is_empty() {
+                    content.push_str(d);
+                    let _ = on_event.send(serde_json::json!({ "t": "c", "v": content }).to_string());
+                }
+            }
+            if let Some(r) = choice["delta"]["reasoning_content"].as_str() {
+                if !r.is_empty() {
+                    reasoning_chars += r.chars().count();
+                    let _ = on_event.send(serde_json::json!({ "t": "r", "n": reasoning_chars }).to_string());
+                }
+            }
+            if let Some(f) = choice["finish_reason"].as_str() {
+                finish = Some(f.to_string());
+            }
+        }
+        if chunk.get("usage").map(|u| u.is_object()).unwrap_or(false) {
+            usage = chunk["usage"].clone();
+        }
+    }
+
+    Ok(serde_json::json!({
+        "content": content,
+        "finish_reason": finish,
+        "usage": usage,
+        "reasoning_chars": reasoning_chars,
+    }))
+}
+
 fn shorten(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -198,7 +296,8 @@ pub fn run() {
             copy_tree,
             default_library_dir,
             app_settings_path,
-            ai_chat
+            ai_chat,
+            ai_chat_stream
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

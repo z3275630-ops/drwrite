@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, TimelineEvent } from '../types';
 import type { TimelineData } from '../lib/structure';
 import * as st from '../lib/structure';
+import { relTime } from '../lib/library';
 import { Modal } from './Modal';
 import { toast } from './Toast';
 
@@ -20,6 +21,13 @@ export default function StructureTab(props: {
   onForeshadowsChange: (f: Foreshadow[]) => void;
   onJumpChapter: (id: string) => void;
   onConsistencyCheck: () => void;
+  aiReady: boolean;
+  /** AI 汇总更新剧情总览（失败在 Editor 侧提示） */
+  onGenerateSummary: () => Promise<void>;
+  /** 手动保存总览文本 */
+  onSaveSummary: (text: string) => void;
+  /** 为缺梗概的章节批量生成，onProgress 汇报进度 */
+  onFillSynopses: (onProgress: (done: number, total: number) => void) => Promise<void>;
 }) {
   const [sub, setSub] = useState<'timeline' | 'foreshadow'>('timeline');
   const [laneId, setLaneId] = useState(props.timeline.lanes[0]?.id ?? '');
@@ -27,6 +35,11 @@ export default function StructureTab(props: {
   const [laneDraft, setLaneDraft] = useState('');
   const [editEvent, setEditEvent] = useState<TimelineEvent | null>(null);
   const [editFore, setEditFore] = useState<Foreshadow | null>(null);
+  const [sumBusy, setSumBusy] = useState(false);
+  const [sumEdit, setSumEdit] = useState<string | null>(null);
+  const [fillBusy, setFillBusy] = useState(false);
+  const [fillProgress, setFillProgress] = useState<{ done: number; total: number } | null>(null);
+  const [confirmFill, setConfirmFill] = useState(false);
 
   const chapters = props.book.chapters;
   const chapterLabel = (id?: string | null) => {
@@ -95,8 +108,90 @@ export default function StructureTab(props: {
     items: props.foreshadows.filter((f) => st.foreshadowStateOf(f, chapters) === s),
   })).filter((g) => g.items.length);
 
+  /* ---------- 剧情总览 ---------- */
+
+  const summary = props.book.plotSummary ?? '';
+  const upto = props.book.plotSummaryUpto ?? 0;
+  const hasNew = upto < chapters.length;
+  const missingSyn = chapters.filter((c) => c.wordCount > 0 && !c.synopsis).length;
+
+  const generateSummary = async () => {
+    setSumBusy(true);
+    try {
+      await props.onGenerateSummary();
+    } finally {
+      setSumBusy(false);
+    }
+  };
+
+  const fillAll = async () => {
+    if (!confirmFill) {
+      setConfirmFill(true);
+      window.setTimeout(() => setConfirmFill(false), 4000);
+      return;
+    }
+    setConfirmFill(false);
+    setFillBusy(true);
+    try {
+      await props.onFillSynopses((done, total) => setFillProgress({ done, total }));
+      toast('梗概补全完成');
+    } catch (e) {
+      toast(String(e instanceof Error ? e.message : e), 'err');
+    } finally {
+      setFillBusy(false);
+      setFillProgress(null);
+    }
+  };
+
   return (
     <div className="entity-pane">
+      <div className="plot-card">
+        <div className="plot-head">
+          <span className="plot-title">剧情总览</span>
+          <span className="entity-sub">
+            {summary
+              ? `已覆盖前 ${upto} 章${props.book.plotSummaryAt ? ' · ' + relTime(props.book.plotSummaryAt) : ''}`
+              : '尚未生成'}
+          </span>
+        </div>
+        <div className={'plot-text' + (summary ? '' : ' empty')}>
+          {summary
+            ? summary.slice(0, 180) + (summary.length > 180 ? '…' : '')
+            : '全书的滚动摘要。生成后，AI 续写、章纲、对话都会带着这份「全书记忆」，写到几百万字也忘不了开头埋的线。'}
+        </div>
+        <div className="plot-actions">
+          <button
+            className="ghost-btn small"
+            disabled={!props.aiReady || sumBusy || !hasNew}
+            title={!props.aiReady ? '先配置 AI' : !hasNew ? '总览已覆盖全部章节，写新章后再更新' : ''}
+            onClick={() => void generateSummary()}
+          >
+            {sumBusy ? '汇总中…' : '✦ AI 汇总更新'}
+          </button>
+          <button
+            className="ghost-btn small"
+            disabled={!summary}
+            onClick={() => setSumEdit(summary)}
+          >
+            查看 / 编辑
+          </button>
+          {missingSyn > 0 && (
+            <button
+              className="ghost-btn small"
+              disabled={!props.aiReady || fillBusy}
+              title={`有 ${missingSyn} 章写了正文但没有梗概；总览按章节梗概汇总`}
+              onClick={() => void fillAll()}
+            >
+              {fillBusy
+                ? `补梗概 ${fillProgress ? fillProgress.done + '/' + fillProgress.total : '…'}`
+                : confirmFill
+                  ? `确认：共 ${missingSyn} 次AI调用`
+                  : `补全缺失梗概（${missingSyn}）`}
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="struct-switch">
         <button className={sub === 'timeline' ? 'on' : ''} onClick={() => setSub('timeline')}>
           时间线
@@ -215,7 +310,38 @@ export default function StructureTab(props: {
           onSave={saveFore}
           onDelete={deleteFore}
           onClose={() => setEditFore(null)}
-      />
+        />
+      )}
+
+      {/* 剧情总览编辑 */}
+      {sumEdit !== null && (
+        <Modal title="剧情总览" width={620} onClose={() => setSumEdit(null)}>
+          <p className="hint-text">
+            全书滚动摘要（500～800 字为宜：主线进展、人物状态、未回收伏笔）。
+            AI 续写、章纲、对话都会带着它，可随时手动修订。
+          </p>
+          <textarea
+            className="syn-area"
+            rows={12}
+            value={sumEdit}
+            onChange={(e) => setSumEdit(e.target.value)}
+          />
+          <div className="modal-actions">
+            <button className="ghost-btn" onClick={() => setSumEdit(null)}>
+              取消
+            </button>
+            <button
+              className="primary-btn"
+              onClick={() => {
+                props.onSaveSummary(sumEdit.trim());
+                setSumEdit(null);
+                toast('剧情总览已保存');
+              }}
+            >
+              保存
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );

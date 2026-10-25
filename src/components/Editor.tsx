@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import type { Editor as TipTapEditor } from '@tiptap/react';
-import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, RefIndexEntry } from '../types';
+import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, RefIndexEntry, Volume } from '../types';
 import { MODEL_VERSION } from '../types';
 import type { JsonValue } from '../lib/json';
 import { countWords, docToPlainText } from '../lib/words';
-import { loadAiConfig, callAi } from '../lib/ai';
+import { loadAiConfig, chatAi } from '../lib/ai';
 import type { AiConfig } from '../lib/ai';
 import { buildAiMessages, TASK_LABELS } from '../lib/assembler';
 import type { AiTaskKind } from '../lib/assembler';
@@ -18,7 +18,9 @@ import {
   entityRefMarkName,
   type HintEntity,
 } from '../extensions/entityRef';
+import { TypewriterExtension } from '../extensions/typewriter';
 import * as ent from '../lib/entities';
+import { addNote } from '../lib/notes';
 import { toast } from './Toast';
 import { Modal } from './Modal';
 import Sidebar from './Sidebar';
@@ -31,6 +33,9 @@ import ProposalModal from './ProposalModal';
 import type { ProposalState } from './ProposalModal';
 import StructureTab from './StructureTab';
 import ChatPanel from './ChatPanel';
+import FontModal, { fontStackOf } from './FontModal';
+import NotesModal from './NotesModal';
+import OutlineModal from './OutlineModal';
 import type { EntityTarget } from './types';
 import type { Foreshadow } from '../types';
 import type { TimelineData } from '../lib/structure';
@@ -83,6 +88,14 @@ export default function Editor(props: {
   const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /* ---------- P5：排版 / 专注 / 素材箱 / 章纲 / 分卷 ---------- */
+  const [prefs, setPrefs] = useState<lib.EditorPrefs>(lib.DEFAULT_PREFS);
+  const [fontOpen, setFontOpen] = useState(false);
+  const [zen, setZen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [outlineModal, setOutlineModal] = useState<{ meta: ChapterMeta; draft: string; busy: boolean } | null>(null);
+  const [deleteVol, setDeleteVol] = useState<Volume | null>(null);
+
   /* ---------- 资料库状态 ---------- */
   const [chars, setChars] = useState<Character[]>([]);
   const [lore, setLore] = useState<LoreEntry[]>([]);
@@ -97,7 +110,7 @@ export default function Editor(props: {
   /* ---------- AI 状态 ---------- */
   const [aiCfg, setAiCfg] = useState<AiConfig | null>(null);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
-  const [selMenu, setSelMenu] = useState<{ x: number; y: number } | null>(null);
+  const [selMenu, setSelMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [selCustom, setSelCustom] = useState('');
   const [proposal, setProposal] = useState<ProposalState | null>(null);
   const pendingAiRef = useRef<{ kind: AiTaskKind; custom?: string; range?: { from: number; to: number } } | null>(null);
@@ -106,7 +119,7 @@ export default function Editor(props: {
   /* ---------- P3：时间线 / 伏笔 / AI 巡检 ---------- */
   const [timeline, setTimeline] = useState<TimelineData>({ lanes: [], events: [] });
   const [foreshadows, setForeshadows] = useState<Foreshadow[]>([]);
-  const [aiReport, setAiReport] = useState<{ phase: 'loading' | 'done' | 'error'; text?: string; error?: string } | null>(null);
+  const [aiReport, setAiReport] = useState<{ phase: 'loading' | 'streaming' | 'done' | 'error'; text?: string; error?: string } | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [synModal, setSynModal] = useState<{ meta: ChapterMeta; draft: string; busy: boolean } | null>(null);
   const [theme, setThemeState] = useState<'light' | 'dark'>(
@@ -120,6 +133,11 @@ export default function Editor(props: {
   const atRef = useRef<AtPopup | null>(null);
   atRef.current = atPopup;
   const paperRef = useRef<HTMLDivElement>(null);
+  const zenRef = useRef(false);
+  zenRef.current = zen;
+  const typewriterRef = useRef(false);
+  /** 关窗钩子随时要拿到最新的 flushSave */
+  const flushRef = useRef<() => Promise<void>>(async () => {});
   /** 编辑器事件处理器走 ref 转发，永远拿到最新闭包 */
   const handlersRef = useRef<{
     onUpdate?: (ed: TipTapEditor) => void;
@@ -131,6 +149,7 @@ export default function Editor(props: {
     extensions: [
       StarterKit,
       EntityRefMark,
+      TypewriterExtension.configure({ isEnabled: () => typewriterRef.current }),
       EntityHintExtension.configure({
         getEntities: () => hintRef.current,
         onHintClick: (info) =>
@@ -189,6 +208,7 @@ export default function Editor(props: {
       toast('保存失败：' + String(e), 'err');
     }
   }, [book, activeId, editor, root, dirName, refreshRefs]);
+  flushRef.current = flushSave;
 
   /** 把一份文档载入编辑器（不计为修改，不触发自动保存） */
   const loadChapterInto = useCallback(
@@ -387,10 +407,12 @@ export default function Editor(props: {
         '【本章正文】\n' + chapterText,
         '【任务】你是连载小说的连续性审校。找出本章与设定资料、伏笔清单之间的硬冲突（时间线错乱、人物设定矛盾、地点/势力张冠李戴、已回收伏笔再次出现等）和存疑项（称呼不一致、疑似遗忘的伏笔）。只报告有依据的问题，每条格式：〔硬冲突/存疑〕问题描述（引用相关原文片段）。没有问题就明确说"未发现明显冲突"。不要改写正文。',
       ].filter(Boolean);
-      const r = await callAi(aiCfg, [{ role: 'user', content: parts.join('\n\n') }], {
-        maxTokens: 4000,
-        temperature: 0.3,
-      });
+      const r = await chatAi(
+        aiCfg,
+        [{ role: 'user', content: parts.join('\n\n') }],
+        { maxTokens: 4000, temperature: 0.3 },
+        { onContent: (full) => setAiReport((p) => (p ? { phase: 'streaming', text: full } : p)) }
+      );
       setAiReport({ phase: 'done', text: r.text });
     } catch (e) {
       setAiReport({ phase: 'error', error: String(e instanceof Error ? e.message : e) });
@@ -470,13 +492,55 @@ export default function Editor(props: {
 
   /* ---------- 全局保存钩子 ---------- */
 
+  // 载入排版偏好（字号/行距/字体/打字机）
+  useEffect(() => {
+    void lib.loadEditorPrefs().then((p) => {
+      setPrefs(p);
+      typewriterRef.current = p.typewriter;
+    });
+  }, []);
+
+  // 关窗前把防抖挂着的最后一次修改落盘（桌面端；800ms 防抖窗口内直接关窗会丢最后一拨字）
+  useEffect(() => {
+    if (!isDesktop) return;
+    let un: (() => void) | undefined;
+    let dead = false;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        const off = await win.onCloseRequested(async (e) => {
+          e.preventDefault();
+          try {
+            await flushRef.current();
+          } catch {
+            /* 尽力而为 */
+          }
+          await win.destroy();
+        });
+        if (dead) off();
+        else un = off;
+      } catch {
+        /* 拿不到窗口就算了 */
+      }
+    })();
+    return () => {
+      dead = true;
+      un?.();
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         void flushSave();
       }
-      if (e.key === 'Escape') setHintPop(null);
+      if (e.key === 'Escape') {
+        if (atRef.current) return; // 先让 @ 弹层自己吃掉
+        if (zenRef.current) setZen(false);
+        else setHintPop(null);
+      }
     };
     const onHide = () => {
       if (document.visibilityState === 'hidden') void flushSave();
@@ -538,6 +602,58 @@ export default function Editor(props: {
     if (i < 0 || j < 0 || j >= book.chapters.length) return;
     const arr = [...book.chapters];
     [arr[i], arr[j]] = [arr[j], arr[i]];
+    await persistBook({ ...book, chapters: arr.map((c, idx) => ({ ...c, index: idx })) });
+  };
+
+  /* ---------- 分卷（P5） ---------- */
+
+  const addVolume = async (title: string) => {
+    if (!book) return;
+    await persistBook({ ...book, volumes: [...(book.volumes ?? []), { id: lib.genId(), title }] });
+  };
+
+  const renameVolume = async (id: string, title: string) => {
+    if (!book) return;
+    await persistBook({
+      ...book,
+      volumes: (book.volumes ?? []).map((v) => (v.id === id ? { ...v, title } : v)),
+    });
+  };
+
+  const doDeleteVolume = async () => {
+    const v = deleteVol;
+    if (!v || !book) return;
+    setDeleteVol(null);
+    await persistBook({
+      ...book,
+      volumes: (book.volumes ?? []).filter((x) => x.id !== v.id),
+      chapters: book.chapters.map((c) => (c.volumeId === v.id ? { ...c, volumeId: undefined } : c)),
+    });
+    toast(`已删除卷「${v.title}」，章节保留在未分卷`);
+  };
+
+  /** 拖到卷头：只改归属，不动顺序 */
+  const dropToVolume = async (chapterId: string, volumeId: string | null) => {
+    if (!book) return;
+    await persistBook({
+      ...book,
+      chapters: book.chapters.map((c) =>
+        c.id === chapterId ? { ...c, volumeId: volumeId ?? undefined } : c
+      ),
+    });
+  };
+
+  /** 拖拽排序：挪到目标章前/后；跨卷拖拽顺带改卷归属 */
+  const reorderChapter = async (dragId: string, targetId: string, pos: 'before' | 'after') => {
+    if (!book || dragId === targetId) return;
+    await flushSave();
+    const dragged = book.chapters.find((c) => c.id === dragId);
+    const target = book.chapters.find((c) => c.id === targetId);
+    if (!dragged || !target) return;
+    const arr = book.chapters.filter((c) => c.id !== dragId);
+    const ti = arr.findIndex((c) => c.id === targetId);
+    const at = pos === 'before' ? ti : ti + 1;
+    arr.splice(at, 0, { ...dragged, volumeId: target.volumeId });
     await persistBook({ ...book, chapters: arr.map((c, idx) => ({ ...c, index: idx })) });
   };
 
@@ -689,14 +805,14 @@ export default function Editor(props: {
   /** 正文右键：有选区才弹 AI 菜单，没有就放行系统菜单（拼写/粘贴） */
   const onPaperContextMenu = (e: React.MouseEvent) => {
     if (!editor) return;
-    const { empty } = editor.state.selection;
+    const { from, to, empty } = editor.state.selection;
     if (empty) {
       setSelMenu(null);
       return;
     }
     e.preventDefault();
     setSelCustom('');
-    setSelMenu({ x: e.clientX, y: e.clientY });
+    setSelMenu({ x: e.clientX, y: e.clientY, text: editor.state.doc.textBetween(from, to, '\n') });
   };
 
   const hostOf = (url: string): string => {
@@ -740,11 +856,13 @@ export default function Editor(props: {
 
       const runOnce = () => {
       setProposal({
-        phase: 'loading',
+        phase: 'streaming',
         title: TASK_LABELS[kind] + (kind === 'custom' && custom ? '：' + clipText(custom, 12) : ''),
         modelTag: cfg.model + ' @ ' + hostOf(cfg.baseUrl),
         startedAt: Date.now(),
         original: selection,
+        streamingText: '',
+        reasoningChars: 0,
       });
       void (async () => {
         try {
@@ -759,13 +877,33 @@ export default function Editor(props: {
             }
           }
           const messages = buildAiMessages(
-            { book, chapter: meta, chapterTail, prevChapterTail: prevTail, prevSynopsis, selection, relatedIds, kind, custom },
+            {
+              book,
+              chapter: meta,
+              chapterTail,
+              prevChapterTail: prevTail,
+              prevSynopsis,
+              plotSummary: kind === 'continue' ? book.plotSummary : undefined,
+              outline: kind === 'continue' ? meta.outline : undefined,
+              selection,
+              relatedIds,
+              kind,
+              custom,
+            },
             chars,
             lore
           );
           const maxTokens =
             kind === 'continue' ? 1500 : Math.min(2200, Math.max(400, Math.round((selection?.length ?? 200) * 3)));
-          const r = await callAi(cfg, messages, { maxTokens, temperature: kind === 'continue' ? 0.9 : 0.7 });
+          const r = await chatAi(
+            cfg,
+            messages,
+            { maxTokens, temperature: kind === 'continue' ? 0.9 : 0.7 },
+            {
+              onContent: (full) => setProposal((p) => (p ? { ...p, streamingText: full } : p)),
+              onReasoning: (n) => setProposal((p) => (p ? { ...p, reasoningChars: n } : p)),
+            }
+          );
           setProposal((p) =>
             p
               ? {
@@ -828,38 +966,178 @@ export default function Editor(props: {
     toast('梗概已保存');
   };
 
+  /** 生成一章梗概（流式落字），弹窗单章与批量补全共用 */
+  const synopsisTextFor = async (meta: ChapterMeta, onText?: (full: string) => void): Promise<string> => {
+    if (!aiCfg || !book) throw new Error('AI 未配置');
+    const f = await lib.readChapter(root, dirName, meta.id);
+    if (!f) throw new Error('读不到这一章');
+    const text = docToPlainText(f.doc as never).slice(0, 8000);
+    const cards = entityCardLines(chars, lore, [...new Set(refs.filter((r) => r.chapterId === meta.id).map((r) => r.targetId))]);
+    const r = await chatAi(
+      aiCfg,
+      [
+        { role: 'system', content: '你负责为长篇小说生成章节梗概。只输出梗概本身，不解释。' },
+        {
+          role: 'user',
+          content:
+            `《${book.title}》第${meta.index + 1}章 ${meta.title}\n` +
+            (cards.length ? '设定资料：\n' + cards.join('\n') + '\n\n' : '') +
+            '本章正文：\n' +
+            text +
+            '\n\n任务：用 50～80 字概括本章剧情要点（谁、在哪、发生了什么、结果/悬念）。只输出概括。',
+        },
+      ],
+      { maxTokens: 600, temperature: 0.4 },
+      onText ? { onContent: onText } : undefined
+    );
+    return r.text;
+  };
+
   const generateSynopsis = async () => {
     if (!synModal || !aiCfg || !book) return;
-    const meta = synModal.meta;
-    const f = await lib.readChapter(root, dirName, meta.id);
-    if (!f) {
-      toast('读不到这一章', 'err');
-      return;
-    }
     setSynModal({ ...synModal, busy: true });
     try {
-      const text = docToPlainText(f.doc as never).slice(0, 8000);
-      const cards = entityCardLines(chars, lore, [...new Set(refs.filter((r) => r.chapterId === meta.id).map((r) => r.targetId))]);
-      const r = await callAi(
-        aiCfg,
-        [
-          { role: 'system', content: '你负责为长篇小说生成章节梗概。只输出梗概本身，不解释。' },
-          {
-            role: 'user',
-            content:
-              `《${book.title}》第${meta.index + 1}章 ${meta.title}\n` +
-              (cards.length ? '设定资料：\n' + cards.join('\n') + '\n\n' : '') +
-              '本章正文：\n' +
-              text +
-              '\n\n任务：用 50～80 字概括本章剧情要点（谁、在哪、发生了什么、结果/悬念）。只输出概括。',
-          },
-        ],
-        { maxTokens: 600, temperature: 0.4 }
+      const text = await synopsisTextFor(synModal.meta, (full) =>
+        setSynModal((m) => (m ? { ...m, draft: full } : m))
       );
-      setSynModal((m) => (m ? { ...m, draft: r.text, busy: false } : m));
+      setSynModal((m) => (m ? { ...m, draft: text, busy: false } : m));
     } catch (e) {
       setSynModal((m) => (m ? { ...m, busy: false } : m));
       toast(String(e instanceof Error ? e.message : e), 'err');
+    }
+  };
+
+  /* ---------- P5：素材箱 ---------- */
+
+  const insertNoteToCursor = (text: string) => {
+    if (!editor) return;
+    editor.chain().focus().insertContent(text + '\n').run();
+    setNotesOpen(false);
+    toast('已插入到光标处');
+  };
+
+  const saveSelectionAsNote = async () => {
+    const t = selMenu?.text?.trim();
+    setSelMenu(null);
+    if (!t) return;
+    try {
+      await addNote(root, dirName, t);
+      toast('已存入素材箱（顶栏「素材」可查看）');
+    } catch (e) {
+      toast('存入失败：' + String(e), 'err');
+    }
+  };
+
+  /* ---------- P5：章纲 ---------- */
+
+  const saveOutline = async () => {
+    if (!outlineModal || !book) return;
+    const chapters = book.chapters.map((c) =>
+      c.id === outlineModal.meta.id ? { ...c, outline: outlineModal.draft.trim() || undefined } : c
+    );
+    await persistBook({ ...book, chapters });
+    setOutlineModal(null);
+    toast('章纲已保存，续写时 AI 会按纲推进');
+  };
+
+  const generateOutline = async () => {
+    if (!outlineModal || !aiCfg || !book) return;
+    const meta = outlineModal.meta;
+    setOutlineModal({ ...outlineModal, busy: true });
+    try {
+      const pending = foreshadows
+        .filter((f) => !f.payoffAnchor && f.plantAnchors.length)
+        .slice(0, 8)
+        .map((f) => {
+          const c = book.chapters.find((x) => x.id === f.plantAnchors[0]?.chapterId);
+          return `· ${f.title}（埋于第${(c?.index ?? 0) + 1}章，待回收）`;
+        })
+        .join('\n');
+      const prev = meta.index > 0 ? book.chapters[meta.index - 1] : null;
+      const parts = [
+        `【作品】《${book.title}》`,
+        book.plotSummary ? '【剧情总览（截至前文）】\n' + book.plotSummary : '',
+        prev?.synopsis ? `【上一章梗概】${prev.synopsis}` : '',
+        meta.synopsis ? `【本章意图（作者手写，优先）】${meta.synopsis}` : '',
+        pending ? '【待回收伏笔（能收尽量收）】\n' + pending : '',
+        `【任务】为第${meta.index + 1}章《${meta.title}》写章纲。日更目标 ${book.dailyGoal ?? 2000} 字。输出 5～8 个要点，每点一行以「1.」编号开头，30～80 字，覆盖：开场承接、事件推进、人物冲突与转变、结尾钩子。只输出章纲，不解释。`,
+      ].filter(Boolean);
+      const r = await chatAi(
+        aiCfg,
+        [
+          { role: 'system', content: '你为长篇小说撰写章节章纲，风格克制、只列可执行的要点。' },
+          { role: 'user', content: parts.join('\n\n') },
+        ],
+        { maxTokens: 1600, temperature: 0.7 },
+        {
+          onContent: (full) => setOutlineModal((m) => (m ? { ...m, draft: full } : m)),
+        }
+      );
+      setOutlineModal((m) => (m ? { ...m, draft: r.text, busy: false } : m));
+    } catch (e) {
+      setOutlineModal((m) => (m ? { ...m, busy: false } : m));
+      toast(String(e instanceof Error ? e.message : e), 'err');
+    }
+  };
+
+  /* ---------- P5：剧情总览 ---------- */
+
+  const generatePlotSummary = async () => {
+    if (!aiCfg || !book) return;
+    const upto = book.plotSummaryUpto ?? 0;
+    const targets = book.chapters.filter((c) => c.index >= upto);
+    if (!targets.length) {
+      toast('总览已覆盖全部章节，写新章后再更新');
+      return;
+    }
+    const syns = targets
+      .map((c) => `第${c.index + 1}章《${c.title}》：${c.synopsis || '（无梗概）'}`)
+      .join('\n');
+    try {
+      const r = await chatAi(
+        aiCfg,
+        [
+          { role: 'system', content: '你维护长篇小说的剧情总览（滚动摘要）。只输出总览正文，不解释。' },
+          {
+            role: 'user',
+            content:
+              (book.plotSummary ? '【现有总览】\n' + book.plotSummary + '\n\n' : '') +
+              '【本次要并入的新章节梗概】\n' +
+              syns +
+              '\n\n任务：把新章节的内容合并进总览，输出更新后的总览：500～800 字，保留主线进展、重要人物的状态变化、已埋未收的伏笔；删去已被后续情节覆盖的细节。只输出总览。',
+          },
+        ],
+        { maxTokens: 2000, temperature: 0.4 }
+      );
+      const lastIdx = targets[targets.length - 1].index + 1;
+      await persistBook({ ...book, plotSummary: r.text, plotSummaryUpto: lastIdx, plotSummaryAt: lib.nowIso() });
+      toast(`剧情总览已更新，覆盖前 ${lastIdx} 章`);
+    } catch (e) {
+      toast(String(e instanceof Error ? e.message : e), 'err');
+    }
+  };
+
+  const savePlotSummary = (text: string) => {
+    if (!book) return;
+    void persistBook({ ...book, plotSummary: text || undefined });
+  };
+
+  const fillMissingSynopses = async (onProgress: (done: number, total: number) => void) => {
+    if (!aiCfg || !book) return;
+    const targets = book.chapters.filter((c) => c.wordCount > 0 && !c.synopsis);
+    if (!targets.length) return;
+    let cur = book;
+    let done = 0;
+    for (const m of targets) {
+      done++;
+      onProgress(done, targets.length);
+      try {
+        const syn = await synopsisTextFor(m);
+        cur = { ...cur, chapters: cur.chapters.map((c) => (c.id === m.id ? { ...c, synopsis: syn } : c)) };
+        await persistBook(cur);
+      } catch {
+        // 单章失败不中断整批
+      }
     }
   };
 
@@ -884,8 +1162,15 @@ export default function Editor(props: {
     };
   }
 
+  // 排版偏好 → CSS 变量（novel-doc 读取 --doc-fs / --doc-lh）
+  const paperStyle = {
+    fontFamily: fontStackOf(prefs.fontFamily),
+    ['--doc-fs' as string]: `${prefs.fontSize}px`,
+    ['--doc-lh' as string]: `${prefs.lineHeight}`,
+  } as React.CSSProperties;
+
   return (
-    <div className="editor-root">
+    <div className={'editor-root' + (zen ? ' zen' : '')}>
       <header className="topbar">
         <button
           className="back-btn"
@@ -936,6 +1221,19 @@ export default function Editor(props: {
           </span>
         </div>
         <div className="topbar-actions">
+          <button className="ghost-btn icon-only" title="排版与手感（字号 / 行距 / 字体 / 打字机滚动）" onClick={() => setFontOpen(true)}>
+            Aa
+          </button>
+          <button
+            className={'ghost-btn' + (zen ? ' on' : '')}
+            title="专注模式：隐藏两侧面板，只留正文（Esc 退出）"
+            onClick={() => setZen(!zen)}
+          >
+            专注
+          </button>
+          <button className="ghost-btn" onClick={() => setNotesOpen(true)}>
+            素材
+          </button>
           <button className="ghost-btn icon-only" title={theme === 'dark' ? '切到浅色' : '切到深色'} onClick={() => void toggleTheme()}>
             {theme === 'dark' ? '☀' : '☾'}
           </button>
@@ -991,6 +1289,15 @@ export default function Editor(props: {
           onDelete={(m) => setDeleteTarget(m)}
           onMove={(id, d) => void moveChapter(id, d)}
           onSynopsis={(m) => setSynModal({ meta: m, draft: m.synopsis ?? '', busy: false })}
+          onOutline={(m) => setOutlineModal({ meta: m, draft: m.outline ?? '', busy: false })}
+          onReorder={(d, t, p) => void reorderChapter(d, t, p)}
+          onDropToVolume={(cid, vid) => void dropToVolume(cid, vid)}
+          onAddVolume={(t) => void addVolume(t)}
+          onRenameVolume={(id, t) => void renameVolume(id, t)}
+          onDeleteVolume={(id) => {
+            const v = book?.volumes?.find((x) => x.id === id);
+            if (v) setDeleteVol(v);
+          }}
           chars={chars}
           lore={lore}
           refs={refs}
@@ -1011,12 +1318,16 @@ export default function Editor(props: {
                 onForeshadowsChange={(f) => void persistForeshadows(f)}
                 onJumpChapter={(id) => void jumpToChapter(id)}
                 onConsistencyCheck={() => void runConsistencyCheck()}
+                aiReady={!!aiCfg}
+                onGenerateSummary={() => generatePlotSummary()}
+                onSaveSummary={savePlotSummary}
+                onFillSynopses={fillMissingSynopses}
               />
             ) : null
           }
         />
         <main className="editor-main">
-          <div className="paper" ref={paperRef} onContextMenu={onPaperContextMenu}>
+          <div className="paper" ref={paperRef} style={paperStyle} onContextMenu={onPaperContextMenu}>
             {editorEmpty && <div className="placeholder-hint">落笔无需完美，先写下第一句……</div>}
             <EditorContent editor={editor} />
             {atPopup && (
@@ -1050,6 +1361,16 @@ export default function Editor(props: {
               <span className="footer-hint">选中文字右键唤起 AI · 输入 @ 引用 · 点虚线转关联</span>
             </span>
             <span className="footer-actions">
+              <button
+                className="ghost-btn small"
+                title="本章写作要点：动笔前定纲，AI 续写按纲推进"
+                disabled={!activeMeta}
+                onClick={() =>
+                  activeMeta && setOutlineModal({ meta: activeMeta, draft: activeMeta.outline ?? '', busy: false })
+                }
+              >
+                📋 章纲
+              </button>
               <button
                 className={'ghost-btn small' + (aiCfg ? '' : ' off')}
                 title={aiCfg ? '接着本章结尾继续写' : '先配置 AI'}
@@ -1263,6 +1584,12 @@ export default function Editor(props: {
             className="sel-menu"
             style={{ left: Math.min(selMenu.x, window.innerWidth - 260), top: Math.min(selMenu.y, window.innerHeight - 240) }}
           >
+            {selMenu.text.trim() && (
+              <button className="sel-act" onClick={() => void saveSelectionAsNote()}>
+                🗂 存为素材
+              </button>
+            )}
+            {selMenu.text.trim() && <div className="menu-sep" />}
             <button className="sel-act" onClick={() => runAiTask('rewrite')}>
               ✎ 改写
             </button>
@@ -1307,9 +1634,68 @@ export default function Editor(props: {
         />
       )}
 
+      {/* 专注模式退出按钮 */}
+      {zen && (
+        <button className="zen-exit" onClick={() => setZen(false)}>
+          退出专注 · Esc
+        </button>
+      )}
+
+      {/* P5：排版 / 素材箱 / 章纲 / 删卷 */}
+      {fontOpen && (
+        <FontModal
+          prefs={prefs}
+          onApply={(p) => {
+            setPrefs(p);
+            typewriterRef.current = p.typewriter;
+            void lib.saveEditorPrefs(p);
+          }}
+          onClose={() => setFontOpen(false)}
+        />
+      )}
+
+      {notesOpen && (
+        <NotesModal
+          root={root}
+          dirName={dirName}
+          onInsert={insertNoteToCursor}
+          onClose={() => setNotesOpen(false)}
+        />
+      )}
+
+      {outlineModal && (
+        <OutlineModal
+          meta={outlineModal.meta}
+          draft={outlineModal.draft}
+          busy={outlineModal.busy}
+          aiReady={!!aiCfg}
+          onChange={(v) => setOutlineModal((m) => (m ? { ...m, draft: v } : m))}
+          onGenerate={() => void generateOutline()}
+          onSave={() => void saveOutline()}
+          onClose={() => setOutlineModal(null)}
+        />
+      )}
+
+      {deleteVol && (
+        <Modal title="删除卷" onClose={() => setDeleteVol(null)}>
+          <p className="confirm-text">
+            确定删除卷「{deleteVol.title}」？
+            <br />
+            卷里的章节全部保留，只是回到「未分卷」。
+          </p>
+          <div className="modal-actions">
+            <button className="ghost-btn" onClick={() => setDeleteVol(null)}>
+              取消
+            </button>
+            <button className="danger-btn" onClick={() => void doDeleteVolume()}>
+              删除
+            </button>
+          </div>
+        </Modal>
+      )}
+
       {/* 章节梗概 */}
-      {synModal && (
-        <Modal title={`第${synModal.meta.index + 1}章 · 梗概`} onClose={() => setSynModal(null)}>
+      {synModal && (        <Modal title={`第${synModal.meta.index + 1}章 · 梗概`} onClose={() => setSynModal(null)}>
           <p className="hint-text">本章的剧情要点。手写的优先；也可以让 AI 读完本章帮你概括。续写、巡检、AI 对话都会带着它。</p>
           <textarea
             className="syn-area"
@@ -1348,6 +1734,17 @@ export default function Editor(props: {
               <p className="hint-text">正在通读本章与设定资料……</p>
             </div>
           )}
+          {aiReport.phase === 'streaming' && (
+            <>
+              <div className="report-text">
+                {aiReport.text}
+                <span className="stream-caret" />
+              </div>
+              <p className="hint-text" style={{ marginTop: 8 }}>
+                正在逐条核对，报告边写边出……
+              </p>
+            </>
+          )}
           {aiReport.phase === 'error' && (
             <div className="prop-error">
               <p>{aiReport.error}</p>
@@ -1370,11 +1767,12 @@ export default function Editor(props: {
   );
 }
 
-/** 20261024-153001 → 2026-10-24 15:30:01 */
+/** auto-20261024-153001 → （每日自动）2026-10-24 15:30:01 */
 function formatSnapName(name: string): string {
-  const m = name.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  const auto = name.startsWith('auto-') ? '（每日自动）' : '';
+  const m = name.replace(/^auto-/, '').match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
   if (!m) return name;
-  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+  return auto + `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
 }
 
 function clipText(s: string, n: number): string {

@@ -22,7 +22,7 @@ import { GENRE_TEMPLATES } from './templates';
 
 export { genId, nowIso, todayStr };
 
-/* ---------- 界面主题（也存全局设置） ---------- */
+/* ---------- 界面主题与编辑偏好（也存全局设置） ---------- */
 
 export type ThemeName = 'light' | 'dark';
 
@@ -35,6 +35,39 @@ export async function setTheme(t: ThemeName): Promise<void> {
   const p = await appSettingsPath();
   const v = (await readJsonOrNull(p)) as Record<string, JsonValue> | null;
   await writeJson(p, { ...(v ?? {}), theme: t } as unknown as JsonValue);
+}
+
+/** 编辑区偏好：字号 / 行距 / 字体 / 打字机滚动（P5） */
+export interface EditorPrefs {
+  fontSize: number;
+  lineHeight: number;
+  /** 'serif' | 'song' | 'hei' | 'kai' | 'fang' */
+  fontFamily: string;
+  typewriter: boolean;
+}
+
+export const DEFAULT_PREFS: EditorPrefs = {
+  fontSize: 17.5,
+  lineHeight: 2.05,
+  fontFamily: 'serif',
+  typewriter: false,
+};
+
+export async function loadEditorPrefs(): Promise<EditorPrefs> {
+  const v = await readJsonOrNull(await appSettingsPath());
+  const p = (v as { editor?: Partial<EditorPrefs> } | null)?.editor ?? {};
+  return {
+    fontSize: typeof p.fontSize === 'number' ? p.fontSize : DEFAULT_PREFS.fontSize,
+    lineHeight: typeof p.lineHeight === 'number' ? p.lineHeight : DEFAULT_PREFS.lineHeight,
+    fontFamily: typeof p.fontFamily === 'string' ? p.fontFamily : DEFAULT_PREFS.fontFamily,
+    typewriter: p.typewriter === true,
+  };
+}
+
+export async function saveEditorPrefs(prefs: EditorPrefs): Promise<void> {
+  const p = await appSettingsPath();
+  const v = (await readJsonOrNull(p)) as Record<string, JsonValue> | null;
+  await writeJson(p, { ...(v ?? {}), editor: prefs as unknown as JsonValue } as unknown as JsonValue);
 }
 
 function timestampName(): string {
@@ -303,23 +336,37 @@ export async function saveChapterWithStats(
     streakDays: computeStreak(next.dailyStats),
   };
   await saveBook(root, dirName, next);
+
+  // 每天第一次真正落盘时自动做一份快照（安全垫：恢复点最多回退到今天开始时）
+  if (next.chapters.length > 0 && next.lastAutoSnapshot !== todayStr()) {
+    try {
+      await createSnapshot(root, dirName, true);
+      await saveBook(root, dirName, { ...next, lastAutoSnapshot: todayStr() });
+      next.lastAutoSnapshot = todayStr();
+    } catch {
+      // 快照失败不影响保存
+    }
+  }
   return next;
 }
 
 /* ---------- 快照 ---------- */
 
-export async function createSnapshot(root: string, dirName: string): Promise<string> {
+/** 手动快照留 20 份；自动快照（每日一份）留 7 份，各自轮转互不挤占 */
+export async function createSnapshot(root: string, dirName: string, auto = false): Promise<string> {
   const bookDir = joinPath(root, dirName);
-  const name = timestampName();
+  const name = (auto ? 'auto-' : '') + timestampName();
   const dst = joinPath(joinPath(bookDir, 'snapshots'), name);
   // 只拷 book.json + chapters/
   await copyTree(joinPath(bookDir, 'chapters'), joinPath(dst, 'chapters'));
   const bookJson = await readJson(bookPathOf(root, dirName));
   await writeJson(joinPath(dst, 'book.json'), bookJson);
 
-  // 只保留最近 20 份
-  const snaps = await listSnapshots(root, dirName);
-  for (const old of snaps.slice(20)) {
+  const keep = auto ? 7 : 20;
+  const snaps = (await listSnapshots(root, dirName)).filter((s) =>
+    auto ? s.startsWith('auto-') : !s.startsWith('auto-')
+  );
+  for (const old of snaps.slice(keep)) {
     await deleteDir(joinPath(joinPath(bookDir, 'snapshots'), old));
   }
   return name;
@@ -381,11 +428,15 @@ export async function composeExport(
   const chapters = opts.scope === 'current'
     ? book.chapters.filter((c) => c.id === opts.chapterId)
     : book.chapters;
+  const volumes = book.volumes ?? [];
+  const volTitle = (id?: string) => volumes.find((v) => v.id === id)?.title;
+  const hasVols = opts.scope === 'all' && volumes.some((v) => chapters.some((c) => c.volumeId === v.id));
 
   const parts: string[] = [];
   if (opts.scope === 'all') {
     parts.push(md ? `# ${book.title}` : book.title);
   }
+  let lastVol: string | undefined = undefined; // undefined = 还没遇到卷
   for (let i = 0; i < chapters.length; i++) {
     const meta = chapters[i];
     const no = meta.index + 1;
@@ -395,8 +446,16 @@ export async function composeExport(
         ? docToMarkdown(file.doc as JsonValue)
         : docToPlainText(file.doc as JsonValue)
       : '';
-    const head = md ? `## 第${no}章 ${meta.title}` : `第${no}章 ${meta.title}`;
-    parts.push(md ? `${head}\n\n${body}` : `${head}\n\n${body}`);
+    const vol = volTitle(meta.volumeId);
+    if (hasVols && vol !== lastVol) {
+      if (vol) parts.push(md ? `## ${vol}` : `\n【${vol}】`);
+      lastVol = vol;
+    }
+    // 有分卷时章节降一级，避免和卷标题同级
+    const head = md
+      ? `${hasVols ? '###' : '##'} 第${no}章 ${meta.title}`
+      : `第${no}章 ${meta.title}`;
+    parts.push(`${head}\n\n${body}`);
   }
   const content = parts.join(md ? '\n\n' : '\n\n');
   const suffix = opts.scope === 'current'

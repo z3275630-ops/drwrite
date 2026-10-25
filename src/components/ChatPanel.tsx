@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, RefIndexEntry } from '../types';
-import { callAi } from '../lib/ai';
+import { chatAi } from '../lib/ai';
 import type { AiConfig, AiMessage } from '../lib/ai';
 import { entityCardLines } from '../lib/assembler';
 import * as st from '../lib/structure';
@@ -29,6 +29,7 @@ export default function ChatPanel(props: {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [streamText, setStreamText] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const loadedRef = useRef(false);
@@ -43,7 +44,7 @@ export default function ChatPanel(props: {
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [msgs, sending]);
+  }, [msgs, sending, streamText]);
 
   const buildContext = (): AiMessage => {
     const relatedIds = [...new Set(props.refs.filter((r) => r.chapterId === props.activeChapterId).map((r) => r.targetId))];
@@ -55,6 +56,7 @@ export default function ChatPanel(props: {
       .map((f) => `· ${f.title}（${st.foreshadowStateOf(f, props.book.chapters)}）`);
     const blocks = [
       `作品：《${props.book.title}》`,
+      props.book.plotSummary ? '剧情总览：\n' + props.book.plotSummary : '',
       allCards.length ? '设定资料：\n' + allCards.join('\n') : '',
       fores.length ? '伏笔清单：\n' + fores.join('\n') : '',
       meta ? `当前在第${meta.index + 1}章「${meta.title}」${meta.synopsis ? '，梗概：' + meta.synopsis : ''}` : '',
@@ -86,9 +88,15 @@ export default function ChatPanel(props: {
     setMsgs(next);
     setInput('');
     setSending(true);
+    setStreamText('');
     try {
       const history: AiMessage[] = next.slice(-12).map((m) => ({ role: m.role, content: m.content }));
-      const r = await callAi(props.aiCfg, [buildContext(), ...history], { maxTokens: 1400, temperature: 0.7 });
+      const r = await chatAi(
+        props.aiCfg,
+        [buildContext(), ...history],
+        { maxTokens: 1400, temperature: 0.7 },
+        { onContent: (full) => setStreamText(full) }
+      );
       const done = [...next, { role: 'assistant' as const, content: r.text, at: new Date().toISOString() }];
       setMsgs(done);
       await saveChat(props.root, props.dirName, done);
@@ -97,6 +105,7 @@ export default function ChatPanel(props: {
       toast(String(e instanceof Error ? e.message : e), 'err');
     } finally {
       setSending(false);
+      setStreamText('');
     }
   };
 
@@ -128,7 +137,9 @@ export default function ChatPanel(props: {
         ))}
         {sending && (
           <div className="chat-msg assistant">
-            <div className="chat-bubble typing">正在想…</div>
+            <div className="chat-bubble typing">
+              {streamText || <span className="typing-dots">正在想…</span>}
+            </div>
           </div>
         )}
       </div>

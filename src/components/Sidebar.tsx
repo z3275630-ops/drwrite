@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import type { Character, ChapterMeta, LoreEntry, RefIndexEntry, CharacterTier, LoreCategory } from '../types';
+import type { Character, ChapterMeta, LoreEntry, RefIndexEntry, CharacterTier, LoreCategory, Volume } from '../types';
 import ChapterList from './ChapterList';
 import { TIERS, LORE_CATEGORIES, aliasMatch, refChapters } from '../lib/entities';
 import type { EntityTarget } from './types';
@@ -8,7 +8,7 @@ import type { EntityTarget } from './types';
 type Tab = 'chapters' | 'chars' | 'lore' | 'structure';
 
 export default function Sidebar(props: {
-  book: { chapters: ChapterMeta[] } | null;
+  book: { chapters: ChapterMeta[]; volumes?: Volume[] } | null;
   activeId: string | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -16,6 +16,12 @@ export default function Sidebar(props: {
   onDelete: (meta: ChapterMeta) => void;
   onMove: (id: string, dir: -1 | 1) => void;
   onSynopsis: (meta: ChapterMeta) => void;
+  onOutline: (meta: ChapterMeta) => void;
+  onReorder: (dragId: string, targetId: string, pos: 'before' | 'after') => void;
+  onDropToVolume: (chapterId: string, volumeId: string | null) => void;
+  onAddVolume: (title: string) => void;
+  onRenameVolume: (id: string, title: string) => void;
+  onDeleteVolume: (id: string) => void;
   chars: Character[];
   lore: LoreEntry[];
   refs: RefIndexEntry[];
@@ -60,6 +66,7 @@ export default function Sidebar(props: {
         props.book && (
           <ChapterList
             chapters={props.book.chapters}
+            volumes={props.book.volumes ?? []}
             activeId={props.activeId}
             onSelect={props.onSelect}
             onAdd={props.onAdd}
@@ -67,6 +74,12 @@ export default function Sidebar(props: {
             onDelete={props.onDelete}
             onMove={props.onMove}
             onSynopsis={props.onSynopsis}
+            onOutline={props.onOutline}
+            onReorder={props.onReorder}
+            onDropToVolume={props.onDropToVolume}
+            onAddVolume={props.onAddVolume}
+            onRenameVolume={props.onRenameVolume}
+            onDeleteVolume={props.onDeleteVolume}
           />
         )
       ) : tab === 'chars' ? (

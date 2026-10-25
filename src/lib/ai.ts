@@ -160,3 +160,196 @@ export async function testConnection(cfg: AiConfig): Promise<number> {
   await callAi(cfg, [{ role: 'user', content: '回复：好' }], { maxTokens: 8, temperature: 0 });
   return Date.now() - t0;
 }
+
+/* ---------- 流式调用（P5）：字到了就推给界面 ---------- */
+
+export interface StreamHandlers {
+  /** 正文增量（参数是到目前为止的全文） */
+  onContent?: (full: string) => void;
+  /** 思考型模型的推理进度（字数） */
+  onReasoning?: (chars: number) => void;
+}
+
+interface StreamSummary {
+  content?: string;
+  finish_reason?: string;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  reasoning_chars?: number;
+}
+
+/**
+ * 流式对话补全：优先走流式；如果彻底没起来（一个字节都没收到）自动退回非流式老路径。
+ * 思考型模型把预算全烧在推理上时（正文空 + length），与 callAi 一样自动加码重试。
+ */
+export async function chatAi(
+  cfg: AiConfig,
+  messages: AiMessage[],
+  opts?: { maxTokens?: number; temperature?: number; timeoutMs?: number },
+  ev?: StreamHandlers
+): Promise<AiResult> {
+  let sawAnything = false;
+  try {
+    return await streamAi(
+      cfg,
+      messages,
+      opts,
+      {
+        onContent: (full) => {
+          sawAnything = true;
+          ev?.onContent?.(full);
+        },
+        onReasoning: (n) => {
+          sawAnything = true;
+          ev?.onReasoning?.(n);
+        },
+      }
+    );
+  } catch (e) {
+    // 已经往界面推过内容就不能静默重来，直接报错
+    if (sawAnything) throw e;
+    return callAi(cfg, messages, opts);
+  }
+}
+
+async function streamAi(
+  cfg: AiConfig,
+  messages: AiMessage[],
+  opts?: { maxTokens?: number; temperature?: number; timeoutMs?: number },
+  ev?: StreamHandlers
+): Promise<AiResult> {
+  const effort = /deepseek/i.test(cfg.baseUrl) ? 'low' : undefined;
+  const maxTokens = Math.max(800, opts?.maxTokens ?? 2048);
+
+  let content = '';
+  let reasoningChars = 0;
+  let finish: string | undefined;
+  let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+
+  const eatChunk = (chunk: unknown) => {
+    const c = chunk as {
+      choices?: { delta?: { content?: string; reasoning_content?: string }; finish_reason?: string }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    if (c.usage && typeof c.usage === 'object') usage = c.usage;
+    const ch = c.choices?.[0];
+    if (!ch) return;
+    const d = ch.delta ?? {};
+    if (typeof d.content === 'string' && d.content) {
+      content += d.content;
+      ev?.onContent?.(content);
+    }
+    if (typeof d.reasoning_content === 'string' && d.reasoning_content) {
+      reasoningChars += d.reasoning_content.length;
+      ev?.onReasoning?.(reasoningChars);
+    }
+    if (typeof ch.finish_reason === 'string' && ch.finish_reason) finish = ch.finish_reason;
+  };
+
+  if (isDesktop) {
+    const { invoke, Channel } = await import('@tauri-apps/api/core');
+    const ch = new Channel<string>();
+    ch.onmessage = (raw: string) => {
+      try {
+        const e = JSON.parse(raw) as { t?: string; v?: string; n?: number };
+        if (e.t === 'c' && typeof e.v === 'string') {
+          content = e.v;
+          ev?.onContent?.(content);
+        } else if (e.t === 'r' && typeof e.n === 'number') {
+          reasoningChars = e.n;
+          ev?.onReasoning?.(reasoningChars);
+        }
+      } catch {
+        /* 坏帧忽略 */
+      }
+    };
+    const summary = await invoke<StreamSummary>('ai_chat_stream', {
+      args: {
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        messages,
+        maxTokens,
+        temperature: opts?.temperature,
+        effort,
+      },
+      onEvent: ch,
+    });
+    // 汇总为准（Channel 与返回值可能极端情况下有出入）
+    if (typeof summary.content === 'string' && summary.content !== content) {
+      content = summary.content;
+      ev?.onContent?.(content);
+    }
+    if (summary.usage) usage = summary.usage;
+    if (summary.finish_reason) finish = summary.finish_reason;
+  } else {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), opts?.timeoutMs ?? 300000);
+    try {
+      const res = await fetch(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages,
+          max_tokens: maxTokens,
+          temperature: opts?.temperature ?? 0.8,
+          stream: true,
+          ...(effort ? { effort } : {}),
+        }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(friendlyHttpError(res.status, text));
+      }
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('接口没有返回流');
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const raw of lines) {
+          const l = raw.trim();
+          if (!l.startsWith('data:')) continue;
+          const payload = l.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            eatChunk(JSON.parse(payload));
+          } catch {
+            /* 坏帧忽略 */
+          }
+        }
+      }
+    } catch (e) {
+      if (String(e).includes('abort')) throw new Error('请求超时（模型响应太慢或网络不通）');
+      if (e instanceof Error && e.message.startsWith('接口返回')) throw e;
+      if (e instanceof Error && e.message.includes('Failed to fetch')) {
+        throw new Error('连接失败：该服务可能不允许浏览器直连（桌面版不受此限制），或地址/网络有误');
+      }
+      throw e;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  if (!content.trim()) {
+    if (finish === 'length' && reasoningChars > 0 && maxTokens < 8000) {
+      return streamAi(
+        cfg,
+        messages,
+        { ...opts, maxTokens: Math.min(8000, Math.max(3000, maxTokens * 3)) },
+        ev
+      );
+    }
+    throw new Error('模型没有产出正文（可能被思考耗尽预算），请重试或换非思考型模型');
+  }
+  return {
+    text: content.trim(),
+    promptTokens: usage?.prompt_tokens,
+    completionTokens: usage?.completion_tokens,
+  };
+}
