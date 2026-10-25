@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import type { Book, Character, LoreEntry, RefIndexEntry } from '../types';
+import type { Book, Character, LoreEntry, Prop, RefIndexEntry } from '../types';
+import { propHolder } from '../types';
 import { refChapters } from '../lib/entities';
 import { Modal } from './Modal';
 import type { EntityTarget } from './types';
@@ -8,10 +9,13 @@ export default function Inspector(props: {
   target: EntityTarget;
   chars: Character[];
   lore: LoreEntry[];
+  propEnts: Prop[];
   refs: RefIndexEntry[];
   book: Book;
+  /** 现在停在第几章（index），决定展示人物「截至本章」的状态 */
+  activeChapterIndex?: number;
   onClose: () => void;
-  onEdit: (e: Character | LoreEntry) => void;
+  onEdit: (e: Character | LoreEntry | Prop) => void;
   onDelete: (t: EntityTarget) => void;
   onJumpChapter: (chapterId: string) => void;
   onJumpEntity: (t: EntityTarget) => void;
@@ -19,7 +23,8 @@ export default function Inspector(props: {
   const [confirming, setConfirming] = useState(false);
   const character = props.target.kind === 'character' ? props.chars.find((c) => c.id === props.target.id) : undefined;
   const lore = props.target.kind === 'lore' ? props.lore.find((l) => l.id === props.target.id) : undefined;
-  const entity = character ?? lore;
+  const prop = props.target.kind === 'prop' ? props.propEnts.find((p) => p.id === props.target.id) : undefined;
+  const entity = character ?? lore ?? prop;
   const chapters = refChapters(props.refs, props.target.id);
   const chapterOf = (id: string) => props.book.chapters.find((c) => c.id === id);
 
@@ -27,11 +32,34 @@ export default function Inspector(props: {
     ids.map((fid) => props.lore.find((l) => l.id === fid)?.name).filter(Boolean) as string[];
   const memberNames = (fid: string) => props.chars.filter((c) => c.factionIds.includes(fid));
 
+  const stateAt = (c: Character): string | null => {
+    const activeIdx = props.activeChapterIndex ?? props.book.chapters.length - 1;
+    const hit = [...(c.statusLog ?? [])]
+      .filter((s) => s.fromChapterIndex <= activeIdx)
+      .sort((a, b) => a.fromChapterIndex - b.fromChapterIndex)
+      .pop();
+    return hit?.label ?? null;
+  };
+
+  const chapterChips = (
+    <div className="chips">
+      {chapters.map((r) => {
+        const ch = chapterOf(r.chapterId);
+        return (
+          <button key={r.chapterId} className="chip" onClick={() => props.onJumpChapter(r.chapterId)}>
+            第{(ch?.index ?? 0) + 1}章
+          </button>
+        );
+      })}
+      {!chapters.length && <span className="entity-sub">正文里还没有关联（可用 @ 或点淡提示关联）</span>}
+    </div>
+  );
+
   return (
     <aside className="inspector">
       <div className="inspector-head">
         <span className="inspector-title">
-          {character ? '人物' : lore ? '设定' : '检视'}
+          {character ? '人物' : lore ? '设定' : prop ? '道具' : '检视'}
         </span>
         <button className="icon-btn" onClick={props.onClose} aria-label="关闭检视器">
           ✕
@@ -79,6 +107,11 @@ export default function Inspector(props: {
           {(character.profile.gender || character.profile.age || character.profile.occupation) && (
             <div className="kv">{[character.profile.gender, character.profile.age, character.profile.occupation].filter(Boolean).join(' · ')}</div>
           )}
+          {stateAt(character) && (
+            <div className="kv">
+              <span className="state-now">现况（截至本章）：{stateAt(character)}</span>
+            </div>
+          )}
           {character.personality && <p className="bio">{character.personality}</p>}
           {character.factionIds.length > 0 && (
             <>
@@ -124,17 +157,7 @@ export default function Inspector(props: {
             </>
           )}
           <div className="sec-title">出场 · {chapters.length} 章</div>
-          <div className="chips">
-            {chapters.map((r) => {
-              const ch = chapterOf(r.chapterId);
-              return (
-                <button key={r.chapterId} className="chip" onClick={() => props.onJumpChapter(r.chapterId)}>
-                  第{(ch?.index ?? 0) + 1}章
-                </button>
-              );
-            })}
-            {!chapters.length && <span className="entity-sub">正文里还没有关联（可用 @ 或点淡提示关联）</span>}
-          </div>
+          {chapterChips}
         </div>
       ) : lore ? (
         <div className="inspector-body">
@@ -166,17 +189,54 @@ export default function Inspector(props: {
             </>
           )}
           <div className="sec-title">出场 · {chapters.length} 章</div>
-          <div className="chips">
-            {chapters.map((r) => {
-              const ch = chapterOf(r.chapterId);
-              return (
-                <button key={r.chapterId} className="chip" onClick={() => props.onJumpChapter(r.chapterId)}>
-                  第{(ch?.index ?? 0) + 1}章
-                </button>
-              );
-            })}
-            {!chapters.length && <span className="entity-sub">正文里还没有关联</span>}
+          {chapterChips}
+        </div>
+      ) : prop ? (
+        <div className="inspector-body">
+          <div className="entity-head">
+            <span className="cat-badge c-道具">道具</span>
+            <span className="entity-head-name">{prop.name}</span>
           </div>
+          {prop.aliases.length > 0 && (
+            <div className="chips">
+              {prop.aliases.map((a) => (
+                <span key={a} className="chip static">
+                  {a}
+                </span>
+              ))}
+            </div>
+          )}
+          {prop.content && <p className="bio">{prop.content}</p>}
+          <div className="sec-title">
+            当前持有人 ·{' '}
+            {propHolder(prop) ? props.chars.find((c) => c.id === propHolder(prop))?.name ?? '？' : prop.transfers.length ? '无人持有' : '未记录'}
+          </div>
+          {prop.transfers.length > 0 && (
+            <>
+              <div className="sec-title">流转</div>
+              <div className="rel-list">
+                {[...prop.transfers]
+                  .sort(
+                    (a, b) =>
+                      (chapterOf(a.chapterId)?.index ?? 0) - (chapterOf(b.chapterId)?.index ?? 0)
+                  )
+                  .map((t, i) => (
+                    <div key={i} className="rel-row">
+                      <button className="chip" onClick={() => props.onJumpChapter(t.chapterId)}>
+                        第{(chapterOf(t.chapterId)?.index ?? 0) + 1}章
+                      </button>
+                      <span className="rel-arrow">→</span>
+                      <span className="entity-name">
+                        {t.holderId ? props.chars.find((c) => c.id === t.holderId)?.name ?? '？' : '无人持有'}
+                      </span>
+                      {t.note && <span className="rel-rev">（{t.note}）</span>}
+                    </div>
+                  ))}
+              </div>
+            </>
+          )}
+          <div className="sec-title">出场 · {chapters.length} 章</div>
+          {chapterChips}
         </div>
       ) : null}
 

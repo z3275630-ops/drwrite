@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import type { Character } from '../types';
+import type { Character, RefIndexEntry } from '../types';
 import { Modal } from './Modal';
 
 interface Pt {
@@ -11,11 +11,13 @@ const W = 640;
 const H = 460;
 const RADIUS: Record<string, number> = { 主角: 26, 配角: 20, 闲角: 16, 过客: 13, 龙套: 11 };
 
-/** 简易可拖拽关系图：节点圆形布局，拖动记忆位置；连线带关系称呼 */
+/** 简易可拖拽关系图：节点圆形布局，拖动记忆位置；连线带关系称呼；底部给共演发现建议 */
 export default function GraphModal(props: {
   chars: Character[];
+  refs: RefIndexEntry[];
   onClose: () => void;
   onSelect: (id: string) => void;
+  onEditChar: (id: string) => void;
 }) {
   const nodes = useMemo(() => {
     const byId = new Map(props.chars.map((c) => [c.id, c]));
@@ -67,6 +69,44 @@ export default function GraphModal(props: {
     }
   }
 
+  // 共演发现（P6，学织境「从共演记录主动发现没手动画过的关联」）：
+  // 同章出场的人物对，既没有正向也没有反向关系的，按共演章数排序
+  const suggestions = useMemo(() => {
+    const idSet = new Set(props.chars.map((c) => c.id));
+    const pairCount = new Map<string, number>();
+    const byChapter = new Map<string, Set<string>>();
+    for (const r of props.refs) {
+      if (r.targetType !== 'character' || !idSet.has(r.targetId)) continue;
+      if (!byChapter.has(r.chapterId)) byChapter.set(r.chapterId, new Set());
+      byChapter.get(r.chapterId)!.add(r.targetId);
+    }
+    const related = new Set<string>();
+    for (const c of props.chars) {
+      for (const r of c.relations) {
+        related.add([c.id, r.targetId].sort().join('|'));
+      }
+    }
+    for (const ids of byChapter.values()) {
+      const arr = [...ids];
+      for (let i = 0; i < arr.length; i++) {
+        for (let j = i + 1; j < arr.length; j++) {
+          const key = [arr[i], arr[j]].sort().join('|');
+          if (related.has(key)) continue;
+          pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+        }
+      }
+    }
+    const nameOf = (id: string) => props.chars.find((c) => c.id === id)?.name ?? '?';
+    return [...pairCount.entries()]
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([key, n]) => {
+        const [a, b] = key.split('|');
+        return { a, b, label: `${nameOf(a)} × ${nameOf(b)}`, chapters: n };
+      });
+  }, [props.chars, props.refs]);
+
   return (
     <Modal title="关系图谱" width={700} onClose={props.onClose}>
       <p className="hint-text">拖动节点整理布局；点击节点打开人物卡。连线上的字是关系称呼。</p>
@@ -115,6 +155,20 @@ export default function GraphModal(props: {
           );
         })}
       </svg>
+      {suggestions.length > 0 && (
+        <div className="graph-suggest">
+          <div className="sec-title">共演发现 · 同章出场但还没画关系</div>
+          {suggestions.map((s) => (
+            <div key={s.a + s.b} className="graph-suggest-row">
+              <span className="entity-name">{s.label}</span>
+              <span className="entity-sub">共演 {s.chapters} 章</span>
+              <button className="ghost-btn small" onClick={() => props.onEditChar(s.a)}>
+                建立关系
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </Modal>
   );
 }

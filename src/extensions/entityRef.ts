@@ -65,7 +65,7 @@ export const EntityRefMark = Mark.create({
 /* ---------- 识别淡提示 ---------- */
 
 export interface HintEntity {
-  kind: 'character' | 'lore';
+  kind: 'character' | 'lore' | 'prop';
   id: string;
   name: string;
   aliases: string[];
@@ -179,7 +179,8 @@ export const EntityHintExtension = Extension.create<HintOptions>({
               for (const d of found) {
                 const meta = (d.spec as { entity?: { id: string; kind: string; text: string } }).entity;
                 if (meta && d.from != null && d.to != null) {
-                  const entity: HintEntity = { id: meta.id, kind: meta.kind === 'lore' ? 'lore' : 'character', name: meta.text, aliases: [] };
+                  const kind = meta.kind === 'lore' ? 'lore' : meta.kind === 'prop' ? 'prop' : 'character';
+                  const entity: HintEntity = { id: meta.id, kind, name: meta.text, aliases: [] };
                   opts.onHintClick({ entity, from: d.from, to: d.to, clientX: mouse.clientX, clientY: mouse.clientY });
                   return true; // 消费点击，不落光标
                 }

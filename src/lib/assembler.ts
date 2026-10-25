@@ -2,8 +2,9 @@
  * 上下文装配器：AI 动笔前自动带上「作品信息 + 相关设定卡 + 前文」。
  * 原则（继承自织境）：AI 不直接改正文，一切产物走提案卡确认。
  */
-import type { Book, ChapterMeta, Character, LoreEntry } from '../types';
+import type { Book, ChapterMeta, Character, LoreEntry, Prop } from '../types';
 import type { AiMessage } from './ai';
+import { propHolder } from '../types';
 
 export type AiTaskKind = 'rewrite' | 'expand' | 'shorten' | 'polish' | 'custom' | 'continue';
 
@@ -23,9 +24,15 @@ function clip(s: string, max: number): string {
 }
 
 /** 实体卡 → 紧凑文本行 */
-export function entityCardLines(chars: Character[], lore: LoreEntry[], ids: string[]): string[] {
+export function entityCardLines(
+  chars: Character[],
+  lore: LoreEntry[],
+  ids: string[],
+  props: Prop[] = [],
+  atChapterIndex?: number
+): string[] {
   const out: string[] = [];
-  for (const id of ids.slice(0, 10)) {
+  for (const id of ids.slice(0, 12)) {
     const c = chars.find((x) => x.id === id);
     if (c) {
       const rel = c.relations
@@ -33,10 +40,16 @@ export function entityCardLines(chars: Character[], lore: LoreEntry[], ids: stri
         .filter((s) => s && !s.endsWith('undefined'))
         .slice(0, 4)
         .join('、');
+      // 截至所写章节的状态（如「第40章起：断臂」）
+      const state =
+        atChapterIndex != null && c.statusLog?.length
+          ? [...c.statusLog].filter((s) => s.fromChapterIndex <= atChapterIndex).pop()?.label
+          : undefined;
       out.push(
         clip(
           `· ${c.name}（人物·${c.tier}${c.aliases.length ? '，别名：' + c.aliases.join('/') : ''}）：` +
             [c.profile.gender, c.profile.age, c.profile.occupation].filter(Boolean).join('，') +
+            (state ? `；现况：${state}` : '') +
             (c.personality ? '；' + clip(c.personality, 60) : '') +
             (rel ? '；关系：' + rel : ''),
           MAX_CARD_CHARS + 60
@@ -47,6 +60,19 @@ export function entityCardLines(chars: Character[], lore: LoreEntry[], ids: stri
     const l = lore.find((x) => x.id === id);
     if (l) {
       out.push(clip(`· ${l.name}（设定·${l.category}${l.aliases.length ? '，别名：' + l.aliases.join('/') : ''}）：${l.content}`, MAX_CARD_CHARS + 80));
+      continue;
+    }
+    const p = props.find((x) => x.id === id);
+    if (p) {
+      const holder = propHolder(p);
+      const holderName = holder ? chars.find((x) => x.id === holder)?.name : null;
+      out.push(
+        clip(
+          `· ${p.name}（道具${p.aliases.length ? '，别名：' + p.aliases.join('/') : ''}）：${p.content}` +
+            (holder === null && p.transfers.length ? '；现况：无人持有' : holderName ? `；当前持有：${holderName}` : ''),
+          MAX_CARD_CHARS + 60
+        )
+      );
     }
   }
   return out;
@@ -63,6 +89,8 @@ export interface AssembleInput {
   plotSummary?: string;
   /** 本章章纲（P5）：动笔前定下的要点 */
   outline?: string;
+  /** 本章场景节拍（P6）：sceneMark 列表 */
+  scenes?: { blockIndex: number; title: string }[];
   selection?: string;
   /** 相关实体（本章出场） */
   relatedIds: string[];
@@ -71,7 +99,12 @@ export interface AssembleInput {
   targetWords?: number;
 }
 
-export function buildAiMessages(input: AssembleInput, chars: Character[], lore: LoreEntry[]): AiMessage[] {
+export function buildAiMessages(
+  input: AssembleInput,
+  chars: Character[],
+  lore: LoreEntry[],
+  props: Prop[] = []
+): AiMessage[] {
   const sys: AiMessage = {
     role: 'system',
     content:
@@ -86,10 +119,14 @@ export function buildAiMessages(input: AssembleInput, chars: Character[], lore: 
   const parts: string[] = [];
   parts.push(`【作品】《${input.book.title}》`);
   if (input.plotSummary) parts.push('【剧情总览（截至前文）】\n' + input.plotSummary);
-  const cards = entityCardLines(chars, lore, input.relatedIds);
+  const cards = entityCardLines(chars, lore, input.relatedIds, props, input.chapter.index);
   if (cards.length) parts.push('【设定资料】\n' + cards.join('\n'));
   parts.push(`【本章】第${input.chapter.index + 1}章 ${input.chapter.title}${input.chapter.synopsis ? '：' + clip(input.chapter.synopsis, 100) : ''}`);
   if (input.outline) parts.push('【本章章纲（按要点推进情节）】\n' + clip(input.outline, 900));
+  if (input.scenes?.length) {
+    const beats = input.scenes.map((s, i) => `${i + 1}. ${s.title.trim() || '（未命名场景）'}`).join('\n');
+    parts.push('【本章场景节拍（按此推进，不要写出分隔线本身）】\n' + beats);
+  }
   if (input.prevSynopsis) parts.push('【上一章梗概】' + clip(input.prevSynopsis, 150));
   if (input.prevChapterTail) parts.push('【上一章结尾】\n' + clip(input.prevChapterTail, 600));
   if (input.chapterTail) parts.push('【本章前文】\n' + clip(input.chapterTail, input.kind === 'continue' ? 2000 : 1200));

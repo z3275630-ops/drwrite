@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import type { BookEntry } from '../lib/library';
 import * as lib from '../lib/library';
+import { readTxtFile, parseTxtChapters, importTxtBook } from '../lib/importer';
+import type { ParsedChapter } from '../lib/importer';
+import { countWords } from '../lib/words';
 import { deleteDir, joinPath, isDesktop } from '../lib/fs';
 import { GENRE_TEMPLATES } from '../lib/templates';
 import { toast } from './Toast';
@@ -22,6 +25,8 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
   const [creating, setCreating] = useState(false);
   const [delTarget, setDelTarget] = useState<BookEntry | null>(null);
   const [delText, setDelText] = useState('');
+  const [imp, setImp] = useState<{ name: string; title: string; parsed: ParsedChapter[]; words: number } | null>(null);
+  const [importing, setImporting] = useState(false);
   const [theme, setThemeState] = useState<'light' | 'dark'>((document.body.dataset.theme as 'light' | 'dark') ?? 'light');
 
   useEffect(() => {
@@ -64,6 +69,39 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
     document.body.dataset.theme = next;
     setThemeState(next);
     await lib.setTheme(next);
+  };
+
+  /* ---------- 导入旧书（P6） ---------- */
+
+  const pickTxt = async () => {
+    try {
+      const f = await readTxtFile();
+      if (!f) return;
+      const parsed = parseTxtChapters(f.text);
+      if (!parsed.length) {
+        toast('没读出内容', 'err');
+        return;
+      }
+      const words = parsed.reduce((s, c) => s + countWords(c.paragraphs.join('\n')), 0);
+      setImp({ name: f.name, title: f.name, parsed, words });
+    } catch (e) {
+      toast('读取失败：' + String(e), 'err');
+    }
+  };
+
+  const doImport = async () => {
+    if (!imp) return;
+    setImporting(true);
+    try {
+      const { dirName, book } = await importTxtBook(root, imp.title.trim() || imp.name, imp.parsed);
+      toast(`已导入《${book.title}》：${book.chapters.length} 章 · ${lib.fmtNum(book.stats.totalWords)} 字`);
+      setImp(null);
+      props.onOpen(root, dirName);
+    } catch (e) {
+      toast('导入失败：' + String(e), 'err');
+    } finally {
+      setImporting(false);
+    }
   };
 
   const doDelete = async () => {
@@ -172,6 +210,10 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
                 <div className="new-plus">＋</div>
                 <div className="new-label">新建作品</div>
               </button>
+              <button className="book-card new" onClick={() => void pickTxt()} title="把现成的长篇 TXT 分章导入">
+                <div className="new-plus">⇪</div>
+                <div className="new-label">导入旧书 TXT</div>
+              </button>
             </div>
             {books.length === 0 && (
               <div className="shelf-empty">
@@ -243,6 +285,31 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
             </button>
             <button className="danger-btn" disabled={delText !== delTarget.book.title} onClick={() => void doDelete()}>
               永久删除
+            </button>
+          </div>
+        </Modal>
+      )}
+      {imp && (
+        <Modal title="导入旧书" onClose={() => setImp(null)}>
+          <p className="confirm-text">
+            识别出 <b>{imp.parsed.length}</b> 章 · 约 <b>{lib.fmtNum(imp.words)}</b> 字。
+            {imp.parsed.length <= 3 ? '（没找到「第X章」标题，已按字数切分，可在目录里手动调整）' : ''}
+          </p>
+          <label className="field">
+            <span>书名</span>
+            <input
+              autoFocus
+              value={imp.title}
+              onChange={(e) => setImp({ ...imp, title: e.target.value })}
+              onKeyDown={(e) => e.key === 'Enter' && void doImport()}
+            />
+          </label>
+          <div className="modal-actions">
+            <button className="ghost-btn" onClick={() => setImp(null)}>
+              取消
+            </button>
+            <button className="primary-btn" disabled={importing} onClick={() => void doImport()}>
+              {importing ? '导入中…' : '导入并打开'}
             </button>
           </div>
         </Modal>

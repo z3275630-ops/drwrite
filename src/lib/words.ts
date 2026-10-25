@@ -96,6 +96,11 @@ function docToBlocks(node: PMNode, md: boolean): string[] {
       case 'horizontalRule':
         out.push(md ? '---' : '———');
         break;
+      case 'sceneMark': {
+        const t = typeof child.attrs?.title === 'string' ? (child.attrs.title as string).trim() : '';
+        out.push(md ? `**◇ ${t || '场景'}**` : `◇ ${t || '场景'}`);
+        break;
+      }
       case 'bulletList':
       case 'orderedList': {
         const items = child.content ?? [];

@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import type { Character, ChapterMeta, LoreEntry, RefIndexEntry, CharacterTier, LoreCategory, Volume } from '../types';
+import type { Character, ChapterMeta, LoreEntry, Prop, RefIndexEntry, CharacterTier, LoreCategory, Volume } from '../types';
 import ChapterList from './ChapterList';
 import { TIERS, LORE_CATEGORIES, aliasMatch, refChapters } from '../lib/entities';
 import type { EntityTarget } from './types';
 
-type Tab = 'chapters' | 'chars' | 'lore' | 'structure';
+type Tab = 'chapters' | 'chars' | 'lore' | 'props' | 'structure';
 
 export default function Sidebar(props: {
   book: { chapters: ChapterMeta[]; volumes?: Volume[] } | null;
@@ -24,9 +24,12 @@ export default function Sidebar(props: {
   onDeleteVolume: (id: string) => void;
   chars: Character[];
   lore: LoreEntry[];
+  propEnts: Prop[];
   refs: RefIndexEntry[];
   onInspect: (t: EntityTarget) => void;
   onNew: (kind: 'character' | 'lore') => void;
+  onNewProp: () => void;
+  onReadAi: () => void;
   onOpenGraph: () => void;
   structure?: ReactNode;
 }) {
@@ -35,6 +38,7 @@ export default function Sidebar(props: {
   const [tierFilter, setTierFilter] = useState<'全部' | CharacterTier>('全部');
   const [loreQuery, setLoreQuery] = useState('');
   const [catFilter, setCatFilter] = useState<'全部' | LoreCategory>('全部');
+  const [propQuery, setPropQuery] = useState('');
 
   const chars = props.chars.filter(
     (c) => (tierFilter === '全部' || c.tier === tierFilter) && aliasMatch(c.name, c.aliases, charQuery)
@@ -42,6 +46,7 @@ export default function Sidebar(props: {
   const lore = props.lore.filter(
     (l) => (catFilter === '全部' || l.category === catFilter) && aliasMatch(l.name, l.aliases, loreQuery)
   );
+  const propEnts = props.propEnts.filter((p) => aliasMatch(p.name, p.aliases, propQuery));
 
   return (
     <div className="sidebar">
@@ -54,6 +59,9 @@ export default function Sidebar(props: {
         </button>
         <button className={tab === 'lore' ? 'on' : ''} onClick={() => setTab('lore')}>
           设定{props.lore.length ? ` ${props.lore.length}` : ''}
+        </button>
+        <button className={tab === 'props' ? 'on' : ''} onClick={() => setTab('props')}>
+          道具{props.propEnts.length ? ` ${props.propEnts.length}` : ''}
         </button>
         <button className={tab === 'structure' ? 'on' : ''} onClick={() => setTab('structure')}>
           结构
@@ -114,6 +122,35 @@ export default function Sidebar(props: {
             </button>
             <button className="add-entity" onClick={() => props.onNew('character')}>
               ＋ 新建人物
+            </button>
+          </div>
+        </div>
+      ) : tab === 'props' ? (
+        <div className="entity-pane">
+          <div className="entity-tools">
+            <input
+              className="entity-search"
+              placeholder="搜道具 / 别名"
+              value={propQuery}
+              onChange={(e) => setPropQuery(e.target.value)}
+            />
+          </div>
+          <div className="entity-items">
+            {propEnts.map((p) => (
+              <div key={p.id} className="entity-item" onClick={() => props.onInspect({ kind: 'prop', id: p.id })}>
+                <span className="cat-badge c-道具">道具</span>
+                <span className="entity-name">{p.name}</span>
+                <span className="entity-sub">{refChapters(props.refs, p.id).length} 章</span>
+              </div>
+            ))}
+            {!propEnts.length && <div className="entity-empty">还没有道具。法宝、信物、金手指……建卡记下流转史，正文 @ 引用。</div>}
+          </div>
+          <div className="entity-foot">
+            <button className="ghost-btn small" onClick={props.onReadAi}>
+              ✦ AI 通读建卡
+            </button>
+            <button className="add-entity" onClick={props.onNewProp}>
+              ＋ 新建道具
             </button>
           </div>
         </div>

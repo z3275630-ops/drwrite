@@ -268,6 +268,22 @@ async fn ai_chat_stream(
     }))
 }
 
+/// 读纯文本文件：先按 UTF-8，失败按 GBK 解码（老 TXT 导入用）
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    match std::str::from_utf8(&bytes) {
+        Ok(s) => Ok(s.to_string()),
+        Err(_) => {
+            let (cow, _, had_errors) = encoding_rs::GBK.decode(&bytes);
+            if had_errors {
+                return Err("文件既不是 UTF-8 也不是 GBK 编码".into());
+            }
+            Ok(cow.into_owned())
+        }
+    }
+}
+
 fn shorten(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -288,6 +304,7 @@ pub fn run() {
             read_json_file,
             write_json_file,
             write_text_file,
+            read_text_file,
             list_dir_entries,
             path_exists,
             create_dir,

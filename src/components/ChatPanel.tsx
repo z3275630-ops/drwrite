@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Book, Character, Foreshadow, LoreEntry, RefIndexEntry } from '../types';
+import type { Book, Character, Foreshadow, LoreEntry, Prop, RefIndexEntry } from '../types';
 import { chatAi } from '../lib/ai';
 import type { AiConfig, AiMessage } from '../lib/ai';
 import { entityCardLines } from '../lib/assembler';
@@ -18,6 +18,7 @@ export default function ChatPanel(props: {
   book: Book;
   chars: Character[];
   lore: LoreEntry[];
+  propEnts: Prop[];
   foreshadows: Foreshadow[];
   refs: RefIndexEntry[];
   aiCfg: AiConfig | null;
@@ -47,10 +48,10 @@ export default function ChatPanel(props: {
   }, [msgs, sending, streamText]);
 
   const buildContext = (): AiMessage => {
-    const relatedIds = [...new Set(props.refs.filter((r) => r.chapterId === props.activeChapterId).map((r) => r.targetId))];
-    const cards = entityCardLines(props.chars, props.lore, relatedIds).slice(0, 10);
-    const allCards = cards.length ? cards : entityCardLines(props.chars, props.lore, props.chars.slice(0, 6).map((c) => c.id));
     const meta = props.book.chapters.find((c) => c.id === props.activeChapterId);
+    const relatedIds = [...new Set(props.refs.filter((r) => r.chapterId === props.activeChapterId).map((r) => r.targetId))];
+    const cards = entityCardLines(props.chars, props.lore, relatedIds, props.propEnts, meta?.index).slice(0, 10);
+    const allCards = cards.length ? cards : entityCardLines(props.chars, props.lore, props.chars.slice(0, 6).map((c) => c.id), props.propEnts, meta?.index);
     const fores = props.foreshadows
       .slice(0, 12)
       .map((f) => `· ${f.title}（${st.foreshadowStateOf(f, props.book.chapters)}）`);

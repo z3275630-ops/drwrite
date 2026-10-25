@@ -29,6 +29,7 @@ export interface BaseEntity {
 export type RefTargetType =
   | 'character'
   | 'lore'
+  | 'prop'       // P6：道具
   | 'chapter'
   | 'scene'      // P1
   | 'timeline'   // P1
@@ -90,6 +91,8 @@ export interface Character extends BaseEntity {
   /** 所属势力 = lore 实体的引用（身份型连接，改名自动跟） */
   factionIds: EntityId[];
   relations: CharacterRelation[];
+  /** 状态演变（P6）：从某章起人物的状态变化，如「第40章起：断臂」 */
+  statusLog?: { fromChapterIndex: number; label: string }[];
   /** 预留：逐章状态轨道（年龄/职业/阶段状态） */
   arcs?: {
     age?: Keyframe[];
@@ -112,6 +115,31 @@ export interface LoreEntry extends BaseEntity {
   inlineRefs: EntityRef[];
   /** 势力类专用：成员人物（身份型连接的真源） */
   memberIds?: EntityId[];
+}
+
+/* ---------- 道具（P6）：法宝/信物/金手指，一等的流转史 ---------- */
+
+export interface PropTransfer {
+  /** 发生在哪一章（信息型连接，只跳转不反写） */
+  chapterId: ChapterId;
+  /** 交给谁（人物 id；null = 无人持有/失落） */
+  holderId: EntityId | null;
+  note?: string;
+}
+
+export interface Prop extends BaseEntity {
+  type: 'prop';
+  name: string;
+  aliases: string[];
+  /** 道具说明：是什么、能力与代价 */
+  content: string;
+  /** 流转历史（按剧情顺序）；当前持有人 = 最后一条的 holderId */
+  transfers: PropTransfer[];
+}
+
+/** 当前持有人（派生） */
+export function propHolder(p: Prop): EntityId | null {
+  return p.transfers.length ? p.transfers[p.transfers.length - 1].holderId : null;
 }
 
 /* ---------- 章节（正文 = Tiptap 文档） ---------- */

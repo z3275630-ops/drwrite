@@ -1,10 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, TimelineEvent } from '../types';
 import type { TimelineData } from '../lib/structure';
+import type { SceneInfo } from '../lib/scenes';
+import { sceneLabel } from '../lib/scenes';
 import * as st from '../lib/structure';
+import * as loc from '../lib/locations';
 import { relTime } from '../lib/library';
 import { Modal } from './Modal';
 import { toast } from './Toast';
+import type { EntityTarget } from './types';
 
 interface AnchorSel {
   chapterId: string;
@@ -17,10 +21,15 @@ export default function StructureTab(props: {
   foreshadows: Foreshadow[];
   chars: Character[];
   lore: LoreEntry[];
+  root: string;
+  dirName: string;
+  /** 读某一章的场景列表（时间线/伏笔锚点用） */
+  loadScenes: (chapterId: string) => Promise<SceneInfo[]>;
   onTimelineChange: (t: TimelineData) => void;
   onForeshadowsChange: (f: Foreshadow[]) => void;
-  onJumpChapter: (id: string) => void;
+  onJumpChapter: (chapterId: string, blockIndex?: number) => void;
   onConsistencyCheck: () => void;
+  onInspectEntity: (t: EntityTarget) => void;
   aiReady: boolean;
   /** AI 汇总更新剧情总览（失败在 Editor 侧提示） */
   onGenerateSummary: () => Promise<void>;
@@ -29,28 +38,31 @@ export default function StructureTab(props: {
   /** 为缺梗概的章节批量生成，onProgress 汇报进度 */
   onFillSynopses: (onProgress: (done: number, total: number) => void) => Promise<void>;
 }) {
-  const [sub, setSub] = useState<'timeline' | 'foreshadow'>('timeline');
+  const [sub, setSub] = useState<'timeline' | 'foreshadow' | 'map'>('timeline');
   const [laneId, setLaneId] = useState(props.timeline.lanes[0]?.id ?? '');
   const [addingLane, setAddingLane] = useState(false);
   const [laneDraft, setLaneDraft] = useState('');
   const [editEvent, setEditEvent] = useState<TimelineEvent | null>(null);
   const [editFore, setEditFore] = useState<Foreshadow | null>(null);
+  const [foreView, setForeView] = useState<'board' | 'gantt'>('board');
   const [sumBusy, setSumBusy] = useState(false);
   const [sumEdit, setSumEdit] = useState<string | null>(null);
   const [fillBusy, setFillBusy] = useState(false);
   const [fillProgress, setFillProgress] = useState<{ done: number; total: number } | null>(null);
   const [confirmFill, setConfirmFill] = useState(false);
+  const [tree, setTree] = useState<loc.LocationTree | null>(null);
+  const [nodeEdit, setNodeEdit] = useState<{ id: string; draft: string } | null>(null);
+
+  useEffect(() => {
+    void loc.loadLocations(props.root, props.dirName).then(setTree);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.root, props.dirName]);
 
   const chapters = props.book.chapters;
   const chapterLabel = (id?: string | null) => {
     if (!id) return '';
     const c = chapters.find((x) => x.id === id);
     return c ? `第${c.index + 1}章` : '';
-  };
-  const chapterFull = (id?: string | null) => {
-    if (!id) return '';
-    const c = chapters.find((x) => x.id === id);
-    return c ? `第${c.index + 1}章 ${c.title}` : '';
   };
   const entityName = (id: string) =>
     props.chars.find((c) => c.id === id)?.name ?? props.lore.find((l) => l.id === id)?.name ?? '';
@@ -143,6 +155,93 @@ export default function StructureTab(props: {
     }
   };
 
+  /* ---------- 地点树 ---------- */
+
+  const persistTree = (t: loc.LocationTree) => {
+    setTree(t);
+    void loc.saveLocations(props.root, props.dirName, t);
+  };
+  const placeLore = props.lore.filter((l) => l.category === '地点');
+
+  const renderTree = (parentId: string | null, depth: number): React.ReactNode =>
+    loc.sortedNodes(tree?.nodes ?? [])
+      .filter((n) => n.parentId === parentId)
+      .map((n) => (
+        <div key={n.id}>
+          <div className="loc-row" style={{ paddingLeft: depth * 14 }}>
+            {n.loreId ? (
+              <button
+                className="loc-label bound"
+                title="打开绑定的地点词条"
+                onClick={() => props.onInspectEntity({ kind: 'lore', id: n.loreId! })}
+              >
+                {n.label}
+              </button>
+            ) : nodeEdit?.id === n.id ? (
+              <input
+                className="rename-input"
+                autoFocus
+                value={nodeEdit.draft}
+                onChange={(e) => setNodeEdit({ id: n.id, draft: e.target.value })}
+                onBlur={() => {
+                  if (nodeEdit.draft.trim()) {
+                    persistTree({
+                      nodes: (tree?.nodes ?? []).map((x) =>
+                        x.id === n.id ? { ...x, label: nodeEdit.draft.trim() } : x
+                      ),
+                    });
+                  }
+                  setNodeEdit(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  if (e.key === 'Escape') setNodeEdit(null);
+                }}
+              />
+            ) : (
+              <span
+                className="loc-label"
+                title="双击重命名"
+                onDoubleClick={() => setNodeEdit({ id: n.id, draft: n.label })}
+              >
+                {n.label}
+              </span>
+            )}
+            <span className="loc-ops">
+              <select
+                value={n.loreId ?? ''}
+                title="绑定「地点」类设定词条"
+                onChange={(e) =>
+                  persistTree({
+                    nodes: (tree?.nodes ?? []).map((x) =>
+                      x.id === n.id ? { ...x, loreId: e.target.value || undefined } : x
+                    ),
+                  })
+                }
+              >
+                <option value="">未绑定词条</option>
+                {placeLore.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+              <button className="op" title="添加下级" onClick={() => persistTree({ nodes: [...(tree?.nodes ?? []), loc.newNode('新地点', n.id)] })}>
+                ＋
+              </button>
+              <button
+                className="op danger"
+                title="删除（下级上提一级）"
+                onClick={() => persistTree({ nodes: loc.removeNode(tree?.nodes ?? [], n.id) })}
+              >
+                ✕
+              </button>
+            </span>
+          </div>
+          {renderTree(n.id, depth + 1)}
+        </div>
+      ));
+
   return (
     <div className="entity-pane">
       <div className="plot-card">
@@ -199,6 +298,9 @@ export default function StructureTab(props: {
         <button className={sub === 'foreshadow' ? 'on' : ''} onClick={() => setSub('foreshadow')}>
           伏笔{props.foreshadows.length ? ` ${props.foreshadows.length}` : ''}
         </button>
+        <button className={sub === 'map' ? 'on' : ''} onClick={() => setSub('map')}>
+          地图
+        </button>
       </div>
 
       {sub === 'timeline' ? (
@@ -231,9 +333,15 @@ export default function StructureTab(props: {
           </div>
           <div className="entity-items">
             {laneEvents.map((e) => (
-              <div key={e.id} className="struct-item" onClick={() => setEditEvent(e)}>
+              <div
+                key={e.id}
+                className="struct-item"
+                onClick={() => setEditEvent(e)}
+                title={e.anchor?.blockIndex != null ? '锚定到场景' : '锚定到章'}
+              >
                 <span className="struct-anch">
                   {e.anchor ? chapterLabel(e.anchor.chapterId) : '—'}
+                  {e.anchor?.blockIndex != null ? '·场' : ''}
                 </span>
                 <span className="entity-name">{e.title}</span>
                 <span className="entity-sub">
@@ -252,28 +360,48 @@ export default function StructureTab(props: {
             </button>
           </div>
         </>
-      ) : (
+      ) : sub === 'foreshadow' ? (
         <>
-          <div className="entity-items fore-groups">
-            {groups.map((g) => (
-              <div key={g.state} className="fore-group">
-                <div className="fore-group-head">
-                  <span className="fore-dot" style={{ background: st.foreshadowStateColor(g.state) }} />
-                  {g.state} · {g.items.length}
-                </div>
-                {g.items.map((f) => (
-                  <div key={f.id} className="struct-item" onClick={() => setEditFore(f)}>
-                    <span className="entity-name">{f.title}</span>
-                    <span className="entity-sub">
-                      埋{f.plantAnchors.length ? '·' + f.plantAnchors.map((a) => chapterLabel(a.chapterId)).join(',') : ''}
-                      {f.payoffAnchor ? ' 收·' + chapterLabel(f.payoffAnchor.chapterId) : ''}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-            {!groups.length && <div className="entity-empty">还没有伏笔。埋的时候记一笔，回收时勾一笔。</div>}
+          <div className="fore-view-switch">
+            <button className={foreView === 'board' ? 'on' : ''} onClick={() => setForeView('board')}>
+              看板
+            </button>
+            <button className={foreView === 'gantt' ? 'on' : ''} onClick={() => setForeView('gantt')}>
+              跨度
+            </button>
           </div>
+          {foreView === 'board' ? (
+            <div className="entity-items fore-groups">
+              {groups.map((g) => (
+                <div key={g.state} className="fore-group">
+                  <div className="fore-group-head">
+                    <span className="fore-dot" style={{ background: st.foreshadowStateColor(g.state) }} />
+                    {g.state} · {g.items.length}
+                  </div>
+                  {g.items.map((f) => (
+                    <div key={f.id} className="struct-item" onClick={() => setEditFore(f)}>
+                      <span className="entity-name">{f.title}</span>
+                      <span className="entity-sub">
+                        埋{f.plantAnchors.length ? '·' + f.plantAnchors.map((a) => chapterLabel(a.chapterId)).join(',') : ''}
+                        {f.payoffAnchor ? ' 收·' + chapterLabel(f.payoffAnchor.chapterId) : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {!groups.length && <div className="entity-empty">还没有伏笔。埋的时候记一笔，回收时勾一笔。</div>}
+            </div>
+          ) : (
+            <div className="entity-items">
+              <ForeGantt
+                foreshadows={props.foreshadows}
+                chapters={chapters}
+                onOpen={setEditFore}
+                onJump={props.onJumpChapter}
+              />
+              {!props.foreshadows.length && <div className="entity-empty">还没有伏笔可看跨度</div>}
+            </div>
+          )}
           <div className="entity-foot">
             <button className="ghost-btn small" onClick={props.onConsistencyCheck}>
               AI 巡检本章
@@ -283,6 +411,27 @@ export default function StructureTab(props: {
               onClick={() => setEditFore(st.newForeshadow(''))}
             >
               ＋ 新伏笔
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="entity-items loc-tree">
+            {tree && tree.nodes.length > 0 ? (
+              renderTree(null, 0)
+            ) : (
+              <div className="entity-empty">世界的层级地图：大陆 → 城市 → 地点，节点可绑定「地点」类设定词条。</div>
+            )}
+          </div>
+          <div className="entity-foot">
+            <button
+              className="add-entity"
+              onClick={() => {
+                if (!tree) return;
+                persistTree({ nodes: [...tree.nodes, loc.newNode('新大陆', null)] });
+              }}
+            >
+              ＋ 顶级地点
             </button>
           </div>
         </>
@@ -296,6 +445,7 @@ export default function StructureTab(props: {
           book={props.book}
           chars={props.chars}
           lore={props.lore}
+          loadScenes={props.loadScenes}
           onSave={saveEvent}
           onDelete={deleteEvent}
           onClose={() => setEditEvent(null)}
@@ -347,6 +497,93 @@ export default function StructureTab(props: {
   );
 }
 
+/* ---------- 伏笔甘特图（P6）：每条伏笔一根横条，一眼看出埋收跨度 ---------- */
+
+function ForeGantt(props: {
+  foreshadows: Foreshadow[];
+  chapters: { id: string; index: number; title: string }[];
+  onOpen: (f: Foreshadow) => void;
+  onJump: (chapterId: string) => void;
+}) {
+  const rows = props.foreshadows.map((f) => {
+    const idxOf = (id?: string) => props.chapters.find((c) => c.id === id)?.index;
+    const plants = f.plantAnchors.map((a) => idxOf(a.chapterId)).filter((x): x is number => x != null);
+    const plant = plants.length ? Math.min(...plants) : null;
+    const reinforce = f.reinforceAnchors.map((a) => idxOf(a.chapterId)).filter((x): x is number => x != null);
+    const payoff = f.payoffAnchor ? idxOf(f.payoffAnchor.chapterId) : null;
+    return { f, plant, payoff, reinforce };
+  });
+
+  const N = Math.max(1, props.chapters.length);
+  const LEFT = 96;
+  const STEP = Math.max(10, Math.min(18, Math.floor(560 / N)));
+  const W = LEFT + N * STEP + 16;
+  const ROW_H = 26;
+  const H = Math.max(80, rows.length * ROW_H + 46);
+
+  const xOf = (i: number) => LEFT + i * STEP;
+
+  return (
+    <div className="gantt-wrap">
+      <svg viewBox={`0 0 ${W} ${H}`} className="gantt-svg" style={{ width: Math.min(W, 620) }}>
+        {/* 章号刻度：每 5 章 */}
+        {Array.from({ length: N }, (_, i) => i)
+          .filter((i) => i % 5 === 0)
+          .map((i) => (
+            <g key={i}>
+              <line x1={xOf(i)} y1={22} x2={xOf(i)} y2={H - 20} className="gantt-grid" />
+              <text x={xOf(i)} y={14} className="gantt-tick">
+                {i + 1}
+              </text>
+            </g>
+          ))}
+        {rows.map((r, i) => {
+          const y = 34 + i * ROW_H;
+          if (r.plant == null) {
+            return (
+              <text key={r.f.id} x={4} y={y + 12} className="gantt-label muted">
+                {r.f.title.slice(0, 7)}（未设伏）
+              </text>
+            );
+          }
+          const end = r.payoff ?? N - 1;
+          const overdue = !r.payoff && N - 1 - r.plant > 40;
+          const cls = r.payoff != null ? 'done' : overdue ? 'over' : 'open';
+          return (
+            <g
+              key={r.f.id}
+              className="gantt-row"
+              onClick={() => props.onOpen(r.f)}
+            >
+              <text x={4} y={y + 12} className="gantt-label">
+                {r.f.title.slice(0, 7)}
+              </text>
+              <title>{`${r.f.title}：埋于第${r.plant + 1}章${r.payoff != null ? `，第${r.payoff + 1}章回收` : '，未回收'}`}</title>
+              <rect
+                x={xOf(r.plant)}
+                y={y}
+                width={Math.max(6, xOf(end) - xOf(r.plant) + STEP * 0.6)}
+                height={12}
+                rx={5}
+                className={`gantt-bar ${cls}`}
+              />
+              {r.reinforce.map((ri) => (
+                <circle key={ri} cx={xOf(ri) + STEP / 2} cy={y + 6} r={2.6} className="gantt-dot" />
+              ))}
+              {r.payoff != null && (
+                <circle cx={xOf(r.payoff) + STEP / 2} cy={y + 6} r={3.4} className="gantt-dot done" />
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      <p className="hint-text" style={{ marginTop: 6 }}>
+        横条 = 从埋设到回收的跨度；圆点 = 中途强化；红色 = 埋伏超过 40 章。点击横条编辑。
+      </p>
+    </div>
+  );
+}
+
 /* ---------- 事件编辑弹窗 ---------- */
 
 function EventModal(props: {
@@ -355,15 +592,51 @@ function EventModal(props: {
   book: Book;
   chars: Character[];
   lore: LoreEntry[];
+  loadScenes: (chapterId: string) => Promise<SceneInfo[]>;
   onSave: (e: TimelineEvent) => void;
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
   const [ev, setEv] = useState<TimelineEvent>({ ...props.ev, relatedEntityIds: [...props.ev.relatedEntityIds] });
   const chapters = props.book.chapters;
+  const [scenes, setScenes] = useState<SceneInfo[]>([]);
+
+  useEffect(() => {
+    const cid = ev.anchor?.chapterId;
+    if (!cid) {
+      setScenes([]);
+      return;
+    }
+    void props.loadScenes(cid).then(setScenes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ev.anchor?.chapterId]);
+
+  const sceneChips = (
+    <div className="chips">
+      <button
+        className={'chip toggle' + (ev.anchor?.blockIndex == null ? ' on' : '')}
+        onClick={() => setEv({ ...ev, anchor: ev.anchor ? { chapterId: ev.anchor.chapterId } : ev.anchor })}
+      >
+        章首
+      </button>
+      {scenes.map((s, i) => {
+        const on = ev.anchor?.blockIndex === s.blockIndex;
+        return (
+          <button
+            key={s.blockIndex}
+            className={'chip toggle' + (on ? ' on' : '')}
+            onClick={() => setEv({ ...ev, anchor: { chapterId: ev.anchor!.chapterId, blockIndex: s.blockIndex } })}
+          >
+            ◇ {sceneLabel(s, i + 1)}
+          </button>
+        );
+      })}
+      {ev.anchor && !scenes.length && <span className="entity-sub">这一章还没有场景标记</span>}
+    </div>
+  );
 
   return (
-    <Modal title={props.ev.title ? '编辑事件' : '新事件'} onClose={props.onClose}>
+    <Modal title={props.ev.title ? '编辑事件' : '新事件'} width={520} onClose={props.onClose}>
       <label className="field">
         <span>事件标题 *</span>
         <input autoFocus value={ev.title} onChange={(e) => setEv({ ...ev, title: e.target.value })} />
@@ -394,6 +667,12 @@ function EventModal(props: {
           </select>
         </label>
       </div>
+      {ev.anchor && (
+        <div className="field">
+          <span>锚到哪个场景（可选，跳转更准）</span>
+          {sceneChips}
+        </div>
+      )}
       <div className="field">
         <span>相关人物 / 设定</span>
         <div className="chips">

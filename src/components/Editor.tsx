@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+import { EditorState } from '@tiptap/pm/state';
 import type { Editor as TipTapEditor } from '@tiptap/react';
-import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, RefIndexEntry, Volume } from '../types';
+import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, Prop, RefIndexEntry, Volume } from '../types';
 import { MODEL_VERSION } from '../types';
 import type { JsonValue } from '../lib/json';
 import { countWords, docToPlainText } from '../lib/words';
@@ -19,17 +20,23 @@ import {
   type HintEntity,
 } from '../extensions/entityRef';
 import { TypewriterExtension } from '../extensions/typewriter';
+import { SceneMark } from '../extensions/sceneMark';
 import * as ent from '../lib/entities';
+import * as propl from '../lib/props';
+import { scenesFromDocJson } from '../lib/scenes';
+import type { SceneInfo } from '../lib/scenes';
 import { addNote } from '../lib/notes';
 import { toast } from './Toast';
 import { Modal } from './Modal';
 import Sidebar from './Sidebar';
 import Inspector from './Inspector';
-import { CharacterFormModal, LoreFormModal } from './EntityForms';
+import ChapterPanel from './ChapterPanel';
+import { CharacterFormModal, LoreFormModal, PropFormModal } from './EntityForms';
 import SearchModal from './SearchModal';
 import GraphModal from './GraphModal';
 import AiSettingsModal from './AiSettingsModal';
 import ProposalModal from './ProposalModal';
+import ReaderModal from './ReaderModal';
 import type { ProposalState } from './ProposalModal';
 import StructureTab from './StructureTab';
 import ChatPanel from './ChatPanel';
@@ -46,7 +53,7 @@ import { writeText, joinPath, isDesktop } from '../lib/fs';
 const p2 = (n: number) => String(n).padStart(2, '0');
 
 interface QuickItem {
-  kind: 'character' | 'lore';
+  kind: 'character' | 'lore' | 'prop';
   id: string;
   name: string;
   sub: string;
@@ -95,13 +102,17 @@ export default function Editor(props: {
   const [notesOpen, setNotesOpen] = useState(false);
   const [outlineModal, setOutlineModal] = useState<{ meta: ChapterMeta; draft: string; busy: boolean } | null>(null);
   const [deleteVol, setDeleteVol] = useState<Volume | null>(null);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [scenes, setScenes] = useState<SceneInfo[]>([]);
+  const [sceneEdit, setSceneEdit] = useState<{ pos: number; title: string } | null>(null);
 
   /* ---------- 资料库状态 ---------- */
   const [chars, setChars] = useState<Character[]>([]);
   const [lore, setLore] = useState<LoreEntry[]>([]);
+  const [propEnts, setPropEnts] = useState<Prop[]>([]);
   const [refs, setRefs] = useState<RefIndexEntry[]>([]);
   const [inspector, setInspector] = useState<EntityTarget | null>(null);
-  const [editing, setEditing] = useState<{ entity: Character | LoreEntry } | null>(null);
+  const [editing, setEditing] = useState<{ entity: Character | LoreEntry | Prop } | null>(null);
   const [atPopup, setAtPopup] = useState<AtPopup | null>(null);
   const [hintPop, setHintPop] = useState<HintPop | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -149,13 +160,17 @@ export default function Editor(props: {
     extensions: [
       StarterKit,
       EntityRefMark,
+      SceneMark,
       TypewriterExtension.configure({ isEnabled: () => typewriterRef.current }),
       EntityHintExtension.configure({
         getEntities: () => hintRef.current,
         onHintClick: (info) =>
           setHintPop({ x: info.clientX, y: info.clientY, from: info.from, to: info.to, entity: info.entity }),
         onRefClick: (info) =>
-          setInspector({ kind: info.targetType === 'lore' ? 'lore' : 'character', id: info.targetId }),
+          setInspector({
+            kind: info.targetType === 'lore' ? 'lore' : info.targetType === 'prop' ? 'prop' : 'character',
+            id: info.targetId,
+          }),
       }),
     ],
     content: lib.emptyDoc() as never,
@@ -165,6 +180,23 @@ export default function Editor(props: {
       handleClick: () => {
         handlersRef.current.onClick?.();
         return false;
+      },
+      handleDOMEvents: {
+        dblclick: (view, e) => {
+          const el = (e.target as HTMLElement).closest('.scene-mark');
+          if (!el) return false;
+          try {
+            const pos = view.posAtDOM(el as Node, 0);
+            const node = view.state.doc.nodeAt(pos);
+            if (node?.type.name === 'sceneMark') {
+              setSceneEdit({ pos, title: (node.attrs.title as string) ?? '' });
+              return true;
+            }
+          } catch {
+            /* 定位失败就算了 */
+          }
+          return false;
+        },
       },
     },
     onUpdate: ({ editor: ed }) => handlersRef.current.onUpdate?.(ed),
@@ -210,13 +242,19 @@ export default function Editor(props: {
   }, [book, activeId, editor, root, dirName, refreshRefs]);
   flushRef.current = flushSave;
 
-  /** 把一份文档载入编辑器（不计为修改，不触发自动保存） */
+  /**
+   * 把一份文档载入编辑器（不计为修改，不触发自动保存）。
+   * 用全新的 EditorState 替换，顺带清空撤销历史——否则 Ctrl+Z 会把上一章的内容倒灌进当前章。
+   */
   const loadChapterInto = useCallback(
     (doc: JsonValue, words: number) => {
       if (!editor) return;
       switchingRef.current = true;
       try {
-        editor.chain().setContent(doc as never).run();
+        const node = editor.schema.nodeFromJSON(doc as never);
+        editor.view.updateState(
+          EditorState.create({ schema: editor.schema, doc: node, plugins: editor.state.plugins })
+        );
       } finally {
         switchingRef.current = false;
       }
@@ -226,8 +264,63 @@ export default function Editor(props: {
       dirtyRef.current = false;
       setAtPopup(null);
       setHintPop(null);
+      setScenes(scenesFromDocJson(doc));
     },
     [editor]
+  );
+
+  /* ---------- 场景层（P6） ---------- */
+
+  const scenesOfEditor = useCallback((): SceneInfo[] => {
+    if (!editor) return [];
+    const out: SceneInfo[] = [];
+    editor.state.doc.content.forEach((node, _off, i) => {
+      if (node.type.name === 'sceneMark') {
+        out.push({ blockIndex: i, title: ((node.attrs.title as string) ?? '') });
+      }
+    });
+    return out;
+  }, [editor]);
+
+  const refreshScenes = useCallback(() => setScenes(scenesOfEditor()), [scenesOfEditor]);
+
+  const jumpToScene = (blockIndex: number) => {
+    if (!editor) return;
+    try {
+      const blocks = editor.state.doc.content;
+      if (blockIndex < 0 || blockIndex >= blocks.childCount) return;
+      let offset = 0;
+      for (let i = 0; i < blockIndex; i++) offset += blocks.child(i).nodeSize;
+      editor.chain().focus().setTextSelection(offset + 1).scrollIntoView().run();
+    } catch {
+      /* 越界就算了 */
+    }
+  };
+
+  const insertScene = () => {
+    if (!editor) return;
+    editor.chain().focus().insertContent({ type: 'sceneMark', attrs: { title: '' } } as never).run();
+    toast('已插入场景分隔线，双击它可以命名');
+  };
+
+  const commitSceneTitle = () => {
+    const s = sceneEdit;
+    if (!s || !editor) return;
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(s.pos, undefined, { title: s.title.trim() })
+    );
+    setSceneEdit(null);
+    refreshScenes();
+  };
+
+  /** 给结构页读某一章的场景（活动章直接用编辑器，别的章读文件） */
+  const loadScenesFor = useCallback(
+    async (chapterId: string): Promise<SceneInfo[]> => {
+      if (chapterId === activeId && editor) return scenesOfEditor();
+      const f = await lib.readChapter(root, dirName, chapterId);
+      return f ? scenesFromDocJson(f.doc as JsonValue) : [];
+    },
+    [activeId, editor, scenesOfEditor, root, dirName]
   );
 
   /* ---------- @ 引用弹层 ---------- */
@@ -238,6 +331,7 @@ export default function Editor(props: {
       const pool: QuickItem[] = [
         ...chars.map((c) => ({ kind: 'character' as const, id: c.id, name: c.name, sub: `人物 · ${c.tier}` })),
         ...lore.map((l) => ({ kind: 'lore' as const, id: l.id, name: l.name, sub: `设定 · ${l.category}` })),
+        ...propEnts.map((p) => ({ kind: 'prop' as const, id: p.id, name: p.name, sub: '道具' })),
       ];
       const hit = pool.filter((x) => ent.aliasMatch(x.name, undefined, ql) || (ql && x.name.toLowerCase().includes(ql)));
       hit.sort((a, b) => {
@@ -247,7 +341,7 @@ export default function Editor(props: {
       });
       return hit.slice(0, 8);
     },
-    [chars, lore]
+    [chars, lore, propEnts]
   );
 
   const insertAtRef = useCallback(
@@ -309,6 +403,12 @@ export default function Editor(props: {
     setSaveState('dirty');
     setLiveWords(countWords(ed.getText()));
     setEditorEmpty(ed.isEmpty);
+    // 场景列表跟着正文走（很便宜的一次遍历）
+    const sc: SceneInfo[] = [];
+    ed.state.doc.content.forEach((node, _off, i) => {
+      if (node.type.name === 'sceneMark') sc.push({ blockIndex: i, title: (node.attrs.title as string) ?? '' });
+    });
+    setScenes(sc);
     window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => void flushSave(), 800);
     updateAtPopup(ed);
@@ -355,12 +455,14 @@ export default function Editor(props: {
   /* ---------- 初始化 ---------- */
 
   const reloadEntities = useCallback(async () => {
-    const [cs, ls] = await Promise.all([
+    const [cs, ls, ps] = await Promise.all([
       ent.listCharacters(root, dirName),
       ent.listLore(root, dirName),
+      propl.listProps(root, dirName),
     ]);
     setChars(cs);
     setLore(ls);
+    setPropEnts(ps);
     setTimeline(await st.loadTimeline(root, dirName));
     setForeshadows(await st.loadForeshadows(root, dirName));
   }, [root, dirName]);
@@ -396,7 +498,7 @@ export default function Editor(props: {
       const chapterText = editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n').slice(0, 8000);
       const cards = entityCardLines(chars, lore, [
         ...new Set(refs.filter((r) => r.chapterId === activeId).map((r) => r.targetId)),
-      ]);
+      ], propEnts, meta.index);
       const fores = foreshadows
         .map((f) => `· ${f.title}（${st.foreshadowStateOf(f, book.chapters)}；埋于${f.plantAnchors.map((a) => (book.chapters.find((c) => c.id === a.chapterId)?.index ?? 0) + 1).join('、')}章${f.payoffAnchor ? '，已回收' : ''}）`)
         .slice(0, 20);
@@ -479,16 +581,17 @@ export default function Editor(props: {
     hintRef.current = [
       ...chars.map((c) => ({ kind: 'character' as const, id: c.id, name: c.name, aliases: c.aliases })),
       ...lore.map((l) => ({ kind: 'lore' as const, id: l.id, name: l.name, aliases: l.aliases })),
+      ...propEnts.map((p) => ({ kind: 'prop' as const, id: p.id, name: p.name, aliases: p.aliases })),
     ];
     if (editor) editor.view.dispatch(editor.state.tr.setMeta('drwriteHintRefresh', true));
     if (editor) {
-      const known = new Set([...chars.map((c) => c.id), ...lore.map((l) => l.id)]);
+      const known = new Set([...chars.map((c) => c.id), ...lore.map((l) => l.id), ...propEnts.map((p) => p.id)]);
       editor.view.dom.querySelectorAll<HTMLElement>('[data-entity-id]').forEach((el) => {
         el.classList.toggle('dangling', !known.has(el.getAttribute('data-entity-id') ?? ''));
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chars, lore, editor, activeId, liveWords]);
+  }, [chars, lore, propEnts, editor, activeId, liveWords]);
 
   /* ---------- 全局保存钩子 ---------- */
 
@@ -561,6 +664,21 @@ export default function Editor(props: {
     const f = await lib.readChapter(root, dirName, id);
     loadChapterInto(f?.doc ?? lib.emptyDoc(), f?.meta.wordCount ?? 0);
     setActiveId(id);
+  };
+
+  /** 跳到某章（可选：直接滚到该章的某个场景） */
+  const jumpToChapter = async (id: string, blockIndex?: number) => {
+    setInspector(null);
+    setSearchOpen(false);
+    if (id !== activeId) {
+      await flushSave();
+      const f = await lib.readChapter(root, dirName, id);
+      loadChapterInto(f?.doc ?? lib.emptyDoc(), f?.meta.wordCount ?? 0);
+      setActiveId(id);
+      if (blockIndex != null) window.setTimeout(() => jumpToScene(blockIndex), 60);
+    } else if (blockIndex != null) {
+      jumpToScene(blockIndex);
+    }
   };
 
   const persistBook = async (next: Book) => {
@@ -694,10 +812,11 @@ export default function Editor(props: {
 
   /* ---------- 资料库操作 ---------- */
 
-  const saveEntity = async (entity: Character | LoreEntry) => {
+  const saveEntity = async (entity: Character | LoreEntry | Prop) => {
     try {
       if (entity.type === 'character') await ent.saveCharacter(root, dirName, entity);
-      else await ent.saveLore(root, dirName, entity);
+      else if (entity.type === 'lore') await ent.saveLore(root, dirName, entity);
+      else await propl.saveProp(root, dirName, entity);
       setEditing(null);
       await reloadEntities();
       toast('已保存：' + entity.name);
@@ -708,7 +827,9 @@ export default function Editor(props: {
 
   const removeEntity = async (t: EntityTarget) => {
     try {
-      await ent.deleteEntity(root, dirName, t.kind, t.id);
+      if (t.kind === 'character') await ent.deleteEntity(root, dirName, 'character', t.id);
+      else if (t.kind === 'lore') await ent.deleteEntity(root, dirName, 'lore', t.id);
+      else await propl.deleteProp(root, dirName, t.id);
       setInspector(null);
       await reloadEntities();
       void refreshRefs();
@@ -716,12 +837,6 @@ export default function Editor(props: {
     } catch (e) {
       toast('删除失败：' + String(e), 'err');
     }
-  };
-
-  const jumpToChapter = async (id: string) => {
-    setInspector(null);
-    setSearchOpen(false);
-    await switchChapter(id);
   };
 
   /* ---------- 导出 ---------- */
@@ -885,13 +1000,15 @@ export default function Editor(props: {
               prevSynopsis,
               plotSummary: kind === 'continue' ? book.plotSummary : undefined,
               outline: kind === 'continue' ? meta.outline : undefined,
+              scenes: kind === 'continue' ? scenes : undefined,
               selection,
               relatedIds,
               kind,
               custom,
             },
             chars,
-            lore
+            lore,
+            propEnts
           );
           const maxTokens =
             kind === 'continue' ? 1500 : Math.min(2200, Math.max(400, Math.round((selection?.length ?? 200) * 3)));
@@ -972,7 +1089,7 @@ export default function Editor(props: {
     const f = await lib.readChapter(root, dirName, meta.id);
     if (!f) throw new Error('读不到这一章');
     const text = docToPlainText(f.doc as never).slice(0, 8000);
-    const cards = entityCardLines(chars, lore, [...new Set(refs.filter((r) => r.chapterId === meta.id).map((r) => r.targetId))]);
+    const cards = entityCardLines(chars, lore, [...new Set(refs.filter((r) => r.chapterId === meta.id).map((r) => r.targetId))], propEnts, meta.index);
     const r = await chatAi(
       aiCfg,
       [
@@ -1300,11 +1417,21 @@ export default function Editor(props: {
           }}
           chars={chars}
           lore={lore}
+          propEnts={propEnts}
           refs={refs}
           onInspect={setInspector}
           onNew={(kind) =>
             setEditing({ entity: kind === 'character' ? ent.newCharacter('') : ent.newLore('') })
           }
+          onNewProp={() => setEditing({ entity: propl.newProp('') })}
+          onReadAi={() => {
+            if (!aiCfg) {
+              setAiSettingsOpen(true);
+              toast('先配置 AI 再通读', 'err');
+              return;
+            }
+            setReaderOpen(true);
+          }}
           onOpenGraph={() => setGraphOpen(true)}
           structure={
             book ? (
@@ -1314,10 +1441,14 @@ export default function Editor(props: {
                 foreshadows={foreshadows}
                 chars={chars}
                 lore={lore}
+                root={root}
+                dirName={dirName}
+                loadScenes={loadScenesFor}
                 onTimelineChange={(t) => void persistTimeline(t)}
                 onForeshadowsChange={(f) => void persistForeshadows(f)}
-                onJumpChapter={(id) => void jumpToChapter(id)}
+                onJumpChapter={(id, blockIndex) => void jumpToChapter(id, blockIndex)}
                 onConsistencyCheck={() => void runConsistencyCheck()}
+                onInspectEntity={setInspector}
                 aiReady={!!aiCfg}
                 onGenerateSummary={() => generatePlotSummary()}
                 onSaveSummary={savePlotSummary}
@@ -1341,8 +1472,8 @@ export default function Editor(props: {
                       insertAtRef(it, atPopup.anchor);
                     }}
                   >
-                    <span className={it.kind === 'character' ? 'tier-badge t-配角' : 'cat-badge c-术语'}>
-                      {it.kind === 'character' ? '人物' : '设定'}
+                    <span className={it.kind === 'character' ? 'tier-badge t-配角' : it.kind === 'prop' ? 'cat-badge c-道具' : 'cat-badge c-术语'}>
+                      {it.kind === 'character' ? '人物' : it.kind === 'prop' ? '道具' : '设定'}
                     </span>
                     {it.name}
                     <span className="entity-sub">{it.sub}</span>
@@ -1361,6 +1492,14 @@ export default function Editor(props: {
               <span className="footer-hint">选中文字右键唤起 AI · 输入 @ 引用 · 点虚线转关联</span>
             </span>
             <span className="footer-actions">
+              <button
+                className="ghost-btn small"
+                title="在此处插入场景分隔线（双击可命名）"
+                disabled={!activeMeta}
+                onClick={insertScene}
+              >
+                ◇ 场景
+              </button>
               <button
                 className="ghost-btn small"
                 title="本章写作要点：动笔前定纲，AI 续写按纲推进"
@@ -1384,20 +1523,41 @@ export default function Editor(props: {
             </span>
           </div>
         </main>
-        {inspector && book && (
+        {inspector && book ? (
           <Inspector
             target={inspector}
             chars={chars}
             lore={lore}
+            propEnts={propEnts}
             refs={refs}
             book={book}
+            activeChapterIndex={activeMeta?.index}
             onClose={() => setInspector(null)}
             onEdit={(e) => setEditing({ entity: e })}
             onDelete={(t) => void removeEntity(t)}
             onJumpChapter={(id) => void jumpToChapter(id)}
             onJumpEntity={setInspector}
           />
-        )}
+        ) : book && activeMeta ? (
+          <ChapterPanel
+            book={book}
+            activeIndex={activeMeta.index}
+            chars={chars}
+            lore={lore}
+            propEnts={propEnts}
+            refs={refs}
+            foreshadows={foreshadows}
+            scenes={scenes}
+            onJumpScene={jumpToScene}
+            onAddScene={insertScene}
+            onInspect={setInspector}
+            onOpenOutline={() =>
+              setOutlineModal({ meta: activeMeta, draft: activeMeta.outline ?? '', busy: false })
+            }
+            onOpenSynopsis={() => setSynModal({ meta: activeMeta, draft: activeMeta.synopsis ?? '', busy: false })}
+            onJumpChapter={(id) => void jumpToChapter(id)}
+          />
+        ) : null}
         {chatOpen && book && (
           <ChatPanel
             root={root}
@@ -1405,6 +1565,7 @@ export default function Editor(props: {
             book={book}
             chars={chars}
             lore={lore}
+            propEnts={propEnts}
             foreshadows={foreshadows}
             refs={refs}
             aiCfg={aiCfg}
@@ -1537,6 +1698,16 @@ export default function Editor(props: {
           onClose={() => setEditing(null)}
         />
       )}
+      {editing && editing.entity.type === 'prop' && book && (
+        <PropFormModal
+          initial={editing.entity as Prop}
+          chars={chars}
+          chapters={book.chapters}
+          activeChapterIndex={activeMeta?.index}
+          onSave={(p) => void saveEntity(p)}
+          onClose={() => setEditing(null)}
+        />
+      )}
 
       {searchOpen && book && (
         <SearchModal
@@ -1557,10 +1728,16 @@ export default function Editor(props: {
       {graphOpen && (
         <GraphModal
           chars={chars}
+          refs={refs}
           onClose={() => setGraphOpen(false)}
           onSelect={(id) => {
             setGraphOpen(false);
             setInspector({ kind: 'character', id });
+          }}
+          onEditChar={(id) => {
+            setGraphOpen(false);
+            const c = chars.find((x) => x.id === id);
+            if (c) setEditing({ entity: c });
           }}
         />
       )}
@@ -1692,6 +1869,47 @@ export default function Editor(props: {
             </button>
           </div>
         </Modal>
+      )}
+
+      {/* 场景命名（双击场景分隔线） */}
+      {sceneEdit && (
+        <Modal title="场景命名" onClose={() => setSceneEdit(null)}>
+          <p className="hint-text">给这个场景起个名字（如「破庙夜话」）。时间线、伏笔、本章面板都会显示它。</p>
+          <input
+            className="rename-input wide"
+            autoFocus
+            value={sceneEdit.title}
+            placeholder="场景名（可留空）"
+            onChange={(e) => setSceneEdit({ ...sceneEdit, title: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitSceneTitle();
+              if (e.key === 'Escape') setSceneEdit(null);
+            }}
+          />
+          <div className="modal-actions">
+            <button className="ghost-btn" onClick={() => setSceneEdit(null)}>
+              取消
+            </button>
+            <button className="primary-btn" onClick={commitSceneTitle}>
+              保存
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* AI 通读建卡（P6） */}
+      {readerOpen && book && aiCfg && (
+        <ReaderModal
+          root={root}
+          dirName={dirName}
+          book={book}
+          aiCfg={aiCfg}
+          chars={chars}
+          lore={lore}
+          propEnts={propEnts}
+          onCreated={reloadEntities}
+          onClose={() => setReaderOpen(false)}
+        />
       )}
 
       {/* 章节梗概 */}

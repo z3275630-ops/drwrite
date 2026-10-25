@@ -1,4 +1,4 @@
 export interface EntityTarget {
-  kind: 'character' | 'lore';
+  kind: 'character' | 'lore' | 'prop';
   id: string;
 }
