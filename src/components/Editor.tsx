@@ -622,14 +622,27 @@ export default function Editor(props: {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const win = getCurrentWindow();
+        let closing = false;
         const off = await win.onCloseRequested(async (e) => {
           e.preventDefault();
+          if (closing) return;
+          closing = true;
+          // 本地落盘正常是毫秒级；万一卡住也不能让窗口关不掉
+          await Promise.race([
+            flushRef.current().catch(() => undefined),
+            new Promise((r) => setTimeout(r, 2500)),
+          ]);
           try {
-            await flushRef.current();
+            await win.destroy();
           } catch {
-            /* 尽力而为 */
+            // destroy 需要 core:window:allow-destroy（已加）；万一权限再出问题，走进程退出兜底
+            try {
+              const { invoke } = await import('@tauri-apps/api/core');
+              await invoke('quit_app');
+            } catch {
+              closing = false;
+            }
           }
-          await win.destroy();
         });
         if (dead) off();
         else un = off;

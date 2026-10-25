@@ -284,6 +284,12 @@ fn read_text_file(path: String) -> Result<String, String> {
     }
 }
 
+/// 关窗兜底：窗口销毁被 ACL 拦下时也能真正退出（调用前正文已落盘）
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 fn shorten(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -314,7 +320,8 @@ pub fn run() {
             default_library_dir,
             app_settings_path,
             ai_chat,
-            ai_chat_stream
+            ai_chat_stream,
+            quit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
