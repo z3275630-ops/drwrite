@@ -8,9 +8,41 @@ import { loadChat, saveChat } from '../lib/chat';
 import type { ChatMsg } from '../lib/chat';
 import { toast } from './Toast';
 
+type CtxKey = 'body' | 'cards' | 'fores' | 'summary';
+
+const CTX_PILLS: { key: CtxKey; label: string; title: string }[] = [
+  { key: 'body', label: '本章正文', title: '带上当前章结尾，让回答贴着正文' },
+  { key: 'cards', label: '资料卡', title: '带上本章涉及的人物、设定、道具卡' },
+  { key: 'fores', label: '伏笔', title: '带上伏笔清单与收束状态' },
+  { key: 'summary', label: '剧情总览', title: '带上全书滚动摘要，谈长线情节时打开' },
+];
+
+const STARTERS = [
+  {
+    title: '情节卡住了',
+    desc: '给我三个可行走向，各说利弊',
+    prompt: '我卡在情节推进上了。请结合当前章和剧情总览，给我三个可行走向，每个用两三句话说清怎么走、利弊是什么。',
+  },
+  {
+    title: '人物弧光',
+    desc: '这一卷主角该怎么变',
+    prompt: '结合人物卡和当前进度，说说主角这一卷的人物弧光应该怎么走，哪里最容易写崩，可以怎么避免。',
+  },
+  {
+    title: '埋与收',
+    desc: '待收伏笔先动哪一条',
+    prompt: '帮我看一遍待收伏笔：哪些适合在本卷收、哪些还要再压，分别怎么落地？请按优先级排一下。',
+  },
+  {
+    title: '本章节奏',
+    desc: '哪里拖沓、哪里跳得太快',
+    prompt: '读一下本章正文结尾，指出节奏上拖沓、跳跃或信息过密的地方，给出具体的删改建议。',
+  },
+];
+
 /**
- * AI 写作顾问（学织境的 Quill 定位，但永远不改正文）：
- * 上下文 = 实体卡 + 伏笔清单 + 当前章信息，每次发送时重建；对话本身存在书文件夹里。
+ * AI 写作顾问（学织境 Quill 的安排：品牌头 + 上下文胶囊 + 快捷起手卡 + 底部输入坞）。
+ * 上下文每次发送时按开关重建；对话存在书文件夹里；永远不改正文。
  */
 export default function ChatPanel(props: {
   root: string;
@@ -32,7 +64,14 @@ export default function ChatPanel(props: {
   const [sending, setSending] = useState(false);
   const [streamText, setStreamText] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
+  const [ctx, setCtx] = useState<Record<CtxKey, boolean>>({
+    body: true,
+    cards: true,
+    fores: true,
+    summary: true,
+  });
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadedRef = useRef(false);
 
   useEffect(() => {
@@ -49,19 +88,31 @@ export default function ChatPanel(props: {
 
   const buildContext = (): AiMessage => {
     const meta = props.book.chapters.find((c) => c.id === props.activeChapterId);
-    const relatedIds = [...new Set(props.refs.filter((r) => r.chapterId === props.activeChapterId).map((r) => r.targetId))];
+    const relatedIds = [
+      ...new Set(props.refs.filter((r) => r.chapterId === props.activeChapterId).map((r) => r.targetId)),
+    ];
     const cards = entityCardLines(props.chars, props.lore, relatedIds, props.propEnts, meta?.index).slice(0, 10);
-    const allCards = cards.length ? cards : entityCardLines(props.chars, props.lore, props.chars.slice(0, 6).map((c) => c.id), props.propEnts, meta?.index);
+    const allCards = cards.length
+      ? cards
+      : entityCardLines(
+          props.chars,
+          props.lore,
+          props.chars.slice(0, 6).map((c) => c.id),
+          props.propEnts,
+          meta?.index
+        );
     const fores = props.foreshadows
       .slice(0, 12)
       .map((f) => `· ${f.title}（${st.foreshadowStateOf(f, props.book.chapters)}）`);
     const blocks = [
       `作品：《${props.book.title}》`,
-      props.book.plotSummary ? '剧情总览：\n' + props.book.plotSummary : '',
-      allCards.length ? '设定资料：\n' + allCards.join('\n') : '',
-      fores.length ? '伏笔清单：\n' + fores.join('\n') : '',
-      meta ? `当前在第${meta.index + 1}章「${meta.title}」${meta.synopsis ? '，梗概：' + meta.synopsis : ''}` : '',
-      props.chapterTail ? '当前章正文结尾：\n…' + props.chapterTail.slice(-800) : '',
+      ctx.summary && props.book.plotSummary ? '剧情总览：\n' + props.book.plotSummary : '',
+      ctx.cards && allCards.length ? '设定资料：\n' + allCards.join('\n') : '',
+      ctx.fores && fores.length ? '伏笔清单：\n' + fores.join('\n') : '',
+      meta
+        ? `当前在第${meta.index + 1}章「${meta.title}」${meta.synopsis ? '，梗概：' + meta.synopsis : ''}`
+        : '',
+      ctx.body && props.chapterTail ? '当前章正文结尾：\n…' + props.chapterTail.slice(-800) : '',
     ].filter(Boolean);
     return {
       role: 'system',
@@ -77,8 +128,8 @@ export default function ChatPanel(props: {
     };
   };
 
-  const send = async () => {
-    const text = input.trim();
+  const send = async (override?: string) => {
+    const text = (override ?? input).trim();
     if (!text || sending) return;
     if (!props.aiCfg) {
       props.onNeedSettings();
@@ -110,55 +161,149 @@ export default function ChatPanel(props: {
     }
   };
 
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('已复制');
+    } catch {
+      toast('复制失败，请手动选中文字', 'err');
+    }
+  };
+
+  const cardCount = props.chars.length + props.lore.length + props.propEnts.length;
+
   return (
     <aside className="inspector chat-panel">
-      <div className="inspector-head">
-        <span className="inspector-title">AI 写作顾问{props.aiCfg ? '' : ' · 未配置'}</span>
-        <span>
+      <header className="chat-header">
+        <div className="chat-brand">
+          <span className="chat-brand-mark">✦</span>
+          <span className="chat-brand-name">写作顾问</span>
+          <span className={'chat-status' + (props.aiCfg ? ' on' : '')}>{props.aiCfg ? '已连接' : '未配置'}</span>
+        </div>
+        <div className="chat-header-actions">
           <button className="icon-btn" title="清空对话" onClick={() => setConfirmClear(true)}>
             🗑
           </button>
-          <button className="icon-btn" onClick={props.onClose} aria-label="关闭对话">
+          <button className="icon-btn" title="关闭（对话会保留）" onClick={props.onClose}>
             ✕
           </button>
+        </div>
+      </header>
+
+      <div className="chat-context-bar" role="group" aria-label="本次对话带上的上下文">
+        <span className="chat-context-label">带上</span>
+        {CTX_PILLS.map((p) => (
+          <button
+            key={p.key}
+            className={'chat-ctx-pill' + (ctx[p.key] ? ' on' : '')}
+            title={p.title}
+            aria-pressed={ctx[p.key]}
+            onClick={() => setCtx((c) => ({ ...c, [p.key]: !c[p.key] }))}
+          >
+            {p.label}
+          </button>
+        ))}
+        <span className="chat-context-label" title="人物 + 设定 + 道具卡总数">
+          {cardCount} 卡
         </span>
       </div>
+
       <div className="chat-list" ref={listRef}>
-        {!msgs.length && (
+        {!msgs.length && !sending && (
           <div className="chat-empty">
-            和 AI 聊这本书：情节卡住了？人物弧光怎么走？伏笔什么时候收？
-            <br />
-            它能看到你的设定卡、伏笔清单和当前章正文。
+            <div className="chat-empty-hero">
+              <h3>故事先聊清楚，写起来就顺了</h3>
+              <p>它看得到这本书的设定、伏笔和本章正文；只给建议，不动你的稿子。</p>
+            </div>
+            <div className="chat-starters">
+              {STARTERS.map((s, i) => (
+                <button
+                  key={s.title}
+                  className="chat-starter"
+                  disabled={sending}
+                  onClick={() => void send(s.prompt)}
+                >
+                  <span className="chat-starter-index">{String(i + 1).padStart(2, '0')}</span>
+                  <span className="chat-starter-body">
+                    <span className="chat-starter-title">{s.title}</span>
+                    <span className="chat-starter-desc">{s.desc}</span>
+                  </span>
+                  <span className="chat-starter-arrow">↗</span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
+
         {msgs.map((m, i) => (
           <div key={i} className={'chat-msg ' + m.role}>
-            <div className="chat-bubble">{m.content}</div>
+            {m.role === 'assistant' && <span className="chat-avatar">✦</span>}
+            <div className="chat-bubble-wrap">
+              <div className="chat-bubble">{m.content}</div>
+              {m.role === 'assistant' && (
+                <button className="chat-copy" onClick={() => void copy(m.content)}>
+                  复制
+                </button>
+              )}
+            </div>
           </div>
         ))}
+
         {sending && (
           <div className="chat-msg assistant">
-            <div className="chat-bubble typing">
-              {streamText || <span className="typing-dots">正在想…</span>}
+            <span className="chat-avatar">✦</span>
+            <div className="chat-bubble-wrap">
+              <div className="chat-bubble typing">
+                {streamText ? (
+                  <>
+                    {streamText}
+                    <span className="chat-caret" />
+                  </>
+                ) : (
+                  <span className="typing-dots">正在想…</span>
+                )}
+              </div>
             </div>
           </div>
         )}
       </div>
-      <div className="chat-input-row">
-        <textarea
-          value={input}
-          placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-        />
-        <button className="primary-btn slim" disabled={!input.trim() || sending} onClick={() => void send()}>
-          发送
+
+      {!props.aiCfg && (
+        <button className="chat-setup" onClick={props.onNeedSettings}>
+          还没配置 AI · 点这里填接口地址、模型名和密钥
         </button>
+      )}
+
+      <div className="chat-composer">
+        <div className="chat-composer-inner">
+          <textarea
+            ref={inputRef}
+            rows={2}
+            value={input}
+            placeholder="问情节、人物、伏笔……"
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+          />
+          <button
+            className="chat-send"
+            title="发送（Enter）"
+            aria-label="发送"
+            disabled={!input.trim() || sending}
+            onClick={() => void send()}
+          >
+            ↑
+          </button>
+        </div>
+        <div className="chat-composer-hint">
+          <span>Enter 发送 · Shift+Enter 换行</span>
+          <span>不会改动正文</span>
+        </div>
       </div>
 
       {confirmClear && (

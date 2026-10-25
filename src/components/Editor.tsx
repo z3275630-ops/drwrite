@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { EditorState } from '@tiptap/pm/state';
@@ -21,6 +21,7 @@ import {
 } from '../extensions/entityRef';
 import { TypewriterExtension } from '../extensions/typewriter';
 import { SceneMark } from '../extensions/sceneMark';
+import { HistoryKeys } from '../extensions/historyKeys';
 import * as ent from '../lib/entities';
 import * as propl from '../lib/props';
 import { scenesFromDocJson } from '../lib/scenes';
@@ -105,6 +106,13 @@ export default function Editor(props: {
   const [readerOpen, setReaderOpen] = useState(false);
   const [scenes, setScenes] = useState<SceneInfo[]>([]);
   const [sceneEdit, setSceneEdit] = useState<{ pos: number; title: string } | null>(null);
+  const [titleEdit, setTitleEdit] = useState<{ id: string; draft: string } | null>(null);
+  const [, bumpHistory] = useReducer((x: number) => x + 1, 0);
+
+  // 切章时放弃正在编辑的标题，避免把旧草稿写到新章
+  useEffect(() => {
+    setTitleEdit(null);
+  }, [activeId]);
 
   /* ---------- 资料库状态 ---------- */
   const [chars, setChars] = useState<Character[]>([]);
@@ -161,6 +169,7 @@ export default function Editor(props: {
       StarterKit,
       EntityRefMark,
       SceneMark,
+      HistoryKeys,
       TypewriterExtension.configure({ isEnabled: () => typewriterRef.current }),
       EntityHintExtension.configure({
         getEntities: () => hintRef.current,
@@ -409,6 +418,7 @@ export default function Editor(props: {
       if (node.type.name === 'sceneMark') sc.push({ blockIndex: i, title: (node.attrs.title as string) ?? '' });
     });
     setScenes(sc);
+    bumpHistory();
     window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => void flushSave(), 800);
     updateAtPopup(ed);
@@ -710,6 +720,32 @@ export default function Editor(props: {
       ...book,
       chapters: book.chapters.map((c) => (c.id === id ? { ...c, title } : c)),
     });
+  };
+
+  /* ---------- 正文顶栏：章节名 / 翻页 / 撤销重做 ---------- */
+
+  const startEditChapterTitle = () => {
+    const meta = book?.chapters.find((c) => c.id === activeId);
+    if (!meta) return;
+    setTitleEdit({ id: meta.id, draft: meta.title });
+  };
+
+  const commitChapterTitle = async () => {
+    if (!titleEdit || !book) {
+      setTitleEdit(null);
+      return;
+    }
+    const t = titleEdit.draft.trim();
+    const meta = book.chapters.find((c) => c.id === titleEdit.id);
+    if (t && meta && t !== meta.title) await renameChapter(titleEdit.id, t);
+    setTitleEdit(null);
+  };
+
+  const goChapter = (dir: -1 | 1) => {
+    if (!book || !activeId) return;
+    const i = book.chapters.findIndex((c) => c.id === activeId);
+    const j = i + dir;
+    if (i >= 0 && j >= 0 && j < book.chapters.length) void jumpToChapter(book.chapters[j].id);
   };
 
   const moveChapter = async (id: string, dir: -1 | 1) => {
@@ -1264,6 +1300,7 @@ export default function Editor(props: {
   const goal = book?.dailyGoal ?? 0;
   const goalPct = goal > 0 ? Math.min(100, Math.round((today / goal) * 100)) : 0;
   const activeMeta = book?.chapters.find((c) => c.id === activeId) ?? null;
+  const activePos = book && activeId ? book.chapters.findIndex((c) => c.id === activeId) : -1;
 
   const saveLabel =
     saveState === 'saving' ? '保存中…' : saveState === 'dirty' ? '未保存' : lastSaved ? '已保存 ' + lastSaved : '已保存';
@@ -1322,7 +1359,6 @@ export default function Editor(props: {
               {book?.title ?? '…'}
             </span>
           )}
-          {activeMeta && <span className="chapter-crumb">· {activeMeta.title}</span>}
         </div>
         <div className="topbar-stats">
           <span className={'save-state ' + saveState}>{saveLabel}</span>
@@ -1338,6 +1374,24 @@ export default function Editor(props: {
           </span>
         </div>
         <div className="topbar-actions">
+          <div className="undo-group">
+            <button
+              className="ghost-btn icon-only"
+              title="撤销（Ctrl+Z）"
+              disabled={!editor || !editor.can().undo()}
+              onClick={() => editor?.chain().focus().undo().run()}
+            >
+              ↶
+            </button>
+            <button
+              className="ghost-btn icon-only"
+              title="重做（Ctrl+Y）"
+              disabled={!editor || !editor.can().redo()}
+              onClick={() => editor?.chain().focus().redo().run()}
+            >
+              ↷
+            </button>
+          </div>
           <button className="ghost-btn icon-only" title="排版与手感（字号 / 行距 / 字体 / 打字机滚动）" onClick={() => setFontOpen(true)}>
             Aa
           </button>
@@ -1458,6 +1512,54 @@ export default function Editor(props: {
           }
         />
         <main className="editor-main">
+          <div className="doc-head">
+            <div className="doc-pager">
+              <button
+                className="doc-pager-btn"
+                title="上一章"
+                disabled={activePos <= 0}
+                onClick={() => goChapter(-1)}
+              >
+                ‹
+              </button>
+              <span className="doc-pager-index">
+                {activePos >= 0 ? `${activePos + 1} / ${book?.chapters.length ?? 0}` : '—'}
+              </span>
+              <button
+                className="doc-pager-btn"
+                title="下一章"
+                disabled={!book || activePos < 0 || activePos >= book.chapters.length - 1}
+                onClick={() => goChapter(1)}
+              >
+                ›
+              </button>
+            </div>
+            <div className="doc-title-slot">
+              {titleEdit ? (
+                <input
+                  className="doc-title-input"
+                  autoFocus
+                  value={titleEdit.draft}
+                  onChange={(e) => setTitleEdit({ ...titleEdit, draft: e.target.value })}
+                  onBlur={() => void commitChapterTitle()}
+                  onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                    if (e.key === 'Escape') setTitleEdit(null);
+                  }}
+                />
+              ) : (
+                <h2
+                  className="doc-title"
+                  title={(activeMeta?.title ?? '') + ' · 点击修改'}
+                  onClick={startEditChapterTitle}
+                >
+                  {activeMeta?.title ?? '未选择章节'}
+                </h2>
+              )}
+            </div>
+            <div className="doc-meta">{activeMeta ? `${lib.fmtNum(liveWords)} 字` : ''}</div>
+          </div>
           <div className="paper" ref={paperRef} style={paperStyle} onContextMenu={onPaperContextMenu}>
             {editorEmpty && <div className="placeholder-hint">落笔无需完美，先写下第一句……</div>}
             <EditorContent editor={editor} />
@@ -1538,7 +1640,7 @@ export default function Editor(props: {
             onJumpChapter={(id) => void jumpToChapter(id)}
             onJumpEntity={setInspector}
           />
-        ) : book && activeMeta ? (
+        ) : !chatOpen && book && activeMeta ? (
           <ChapterPanel
             book={book}
             activeIndex={activeMeta.index}
@@ -1558,7 +1660,7 @@ export default function Editor(props: {
             onJumpChapter={(id) => void jumpToChapter(id)}
           />
         ) : null}
-        {chatOpen && book && (
+        {chatOpen && book && !inspector && (
           <ChatPanel
             root={root}
             dirName={dirName}
