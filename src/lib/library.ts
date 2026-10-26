@@ -5,18 +5,21 @@
  *   chapters/<chapterId>.json     每章一个 Tiptap 文档
  *   entities/characters|lore/     P1 资料库（先建目录占位）
  *   refs.json                     引用倒排索引（P1）
- *   snapshots/<时间戳>/           快照 = book.json + chapters 整份拷贝
+ *   snapshots/<时间戳>/           完整快照 = book.json + chapters + entities + 校验清单
  */
 import type { Book, ChapterFile, ChapterMeta, DailyStats } from '../types';
 import { MODEL_VERSION } from '../types';
 import type { JsonValue } from './json';
 import {
   readJson, readJsonOrNull, writeJson, writeText, listDir, exists, mkdir,
-  deleteFile, deleteDir, copyTree, joinPath, defaultLibraryDir, appSettingsPath, isDesktop,
+  deleteFile, joinPath, defaultLibraryDir, appSettingsPath, isDesktop, updateSettings,
 } from './fs';
 import { countWords, docToMarkdown, docToPlainText } from './words';
 import { genId, nowIso, todayStr } from './id';
-import { updateRefsForChapter, rebuildAllRefs, readRefs } from './entities';
+import { updateRefsForChapter, readRefs } from './entities';
+import { createSnapshot, recoverBookRestore } from './snapshots';
+export { createSnapshot, listSnapshots, restoreSnapshot } from './snapshots';
+export type { SnapshotInfo } from './snapshots';
 import * as ent from './entities';
 import { GENRE_TEMPLATES } from './templates';
 
@@ -32,9 +35,7 @@ export async function getTheme(): Promise<ThemeName> {
 }
 
 export async function setTheme(t: ThemeName): Promise<void> {
-  const p = await appSettingsPath();
-  const v = (await readJsonOrNull(p)) as Record<string, JsonValue> | null;
-  await writeJson(p, { ...(v ?? {}), theme: t } as unknown as JsonValue);
+  await updateSettings({ theme: t });
 }
 
 /** 编辑区偏好：字号 / 行距 / 字体 / 打字机滚动（P5） */
@@ -65,15 +66,7 @@ export async function loadEditorPrefs(): Promise<EditorPrefs> {
 }
 
 export async function saveEditorPrefs(prefs: EditorPrefs): Promise<void> {
-  const p = await appSettingsPath();
-  const v = (await readJsonOrNull(p)) as Record<string, JsonValue> | null;
-  await writeJson(p, { ...(v ?? {}), editor: prefs as unknown as JsonValue } as unknown as JsonValue);
-}
-
-function timestampName(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  await updateSettings({ editor: prefs as unknown as JsonValue });
 }
 
 export { readRefs };
@@ -110,9 +103,7 @@ export async function getLibraryRoot(): Promise<string> {
 
 export async function setLibraryRoot(root: string): Promise<void> {
   if (!(await exists(root))) await mkdir(root);
-  const p = await appSettingsPath();
-  const s = await readSettings();
-  await writeJson(p, { ...s, libraryRoot: root } as unknown as JsonValue);
+  await updateSettings({ libraryRoot: root });
 }
 
 /* ---------- 书的列表 ---------- */
@@ -227,7 +218,9 @@ export function bookPathOf(root: string, dirName: string): string {
 }
 
 export async function loadBook(root: string, dirName: string): Promise<Book | null> {
-  const v = await readJsonOrNull(bookPathOf(root, dirName));
+  await recoverBookRestore(root, dirName);
+  const path = bookPathOf(root, dirName);
+  const v = await exists(path) ? await readJson(path) : null;
   return (v as unknown as Book) ?? null;
 }
 
@@ -242,11 +235,11 @@ export async function readChapter(
   chapterId: string
 ): Promise<ChapterFile | null> {
   const p = joinPath(joinPath(root, dirName), 'chapters', `${chapterId}.json`);
-  const v = await readJsonOrNull(p);
+  const v = await exists(p) ? await readJson(p) : null;
   if (!v) return null;
   const f = v as unknown as ChapterFile;
   // 老文件缺 meta 兜底
-  if (!f.meta) return null;
+  if (!f.meta || (f.doc as { type?: string })?.type !== 'doc') throw new Error('章节文件格式损坏，已停止载入');
   return f;
 }
 
@@ -306,7 +299,8 @@ export async function saveChapterWithStats(
   root: string,
   dirName: string,
   book: Book,
-  chapter: ChapterFile
+  chapter: ChapterFile,
+  onWarning?: (message: string) => void
 ): Promise<Book> {
   const newCount = countWords(docToPlainText(chapter.doc as JsonValue));
   const old = book.chapters.find((c) => c.id === chapter.meta.id);
@@ -319,7 +313,7 @@ export async function saveChapterWithStats(
   try {
     await updateRefsForChapter(root, dirName, chapter.meta.id, chapter.doc as JsonValue);
   } catch {
-    // 索引失败不影响正文保存
+    onWarning?.('正文已保存，但资料关联索引更新失败。下次保存会重试。');
   }
 
   const next: Book = { ...book, chapters: book.chapters.map((c) => (c.id === chapter.meta.id ? { ...c, ...chapter.meta } : c)) };
@@ -338,76 +332,16 @@ export async function saveChapterWithStats(
   await saveBook(root, dirName, next);
 
   // 每天第一次真正落盘时自动做一份快照（安全垫：恢复点最多回退到今天开始时）
-  if (next.chapters.length > 0 && next.lastAutoSnapshot !== todayStr()) {
+  if (isDesktop && next.chapters.length > 0 && next.lastAutoSnapshot !== todayStr()) {
     try {
       await createSnapshot(root, dirName, true);
       await saveBook(root, dirName, { ...next, lastAutoSnapshot: todayStr() });
       next.lastAutoSnapshot = todayStr();
     } catch {
-      // 快照失败不影响保存
+      onWarning?.('正文已保存，但每日自动备份失败。请点“备份 / 快照”重试。');
     }
   }
   return next;
-}
-
-/* ---------- 快照 ---------- */
-
-/** 手动快照留 20 份；自动快照（每日一份）留 7 份，各自轮转互不挤占 */
-export async function createSnapshot(root: string, dirName: string, auto = false): Promise<string> {
-  const bookDir = joinPath(root, dirName);
-  const name = (auto ? 'auto-' : '') + timestampName();
-  const dst = joinPath(joinPath(bookDir, 'snapshots'), name);
-  // 只拷 book.json + chapters/
-  await copyTree(joinPath(bookDir, 'chapters'), joinPath(dst, 'chapters'));
-  const bookJson = await readJson(bookPathOf(root, dirName));
-  await writeJson(joinPath(dst, 'book.json'), bookJson);
-
-  const keep = auto ? 7 : 20;
-  const snaps = (await listSnapshots(root, dirName)).filter((s) =>
-    auto ? s.startsWith('auto-') : !s.startsWith('auto-')
-  );
-  for (const old of snaps.slice(keep)) {
-    await deleteDir(joinPath(joinPath(bookDir, 'snapshots'), old));
-  }
-  return name;
-}
-
-export async function listSnapshots(root: string, dirName: string): Promise<string[]> {
-  const dir = joinPath(joinPath(root, dirName), 'snapshots');
-  if (!(await exists(dir))) return [];
-  const entries = await listDir(dir);
-  return entries
-    .filter((e) => e.endsWith('/'))
-    .map((e) => e.slice(0, -1))
-    .sort()
-    .reverse();
-}
-
-/** 恢复快照：先把当前内容做一份"恢复前"快照，再用快照覆盖 */
-export async function restoreSnapshot(
-  root: string,
-  dirName: string,
-  snapName: string
-): Promise<void> {
-  const bookDir = joinPath(root, dirName);
-  await createSnapshot(root, dirName); // 恢复前自动留底
-  const snapDir = joinPath(joinPath(bookDir, 'snapshots'), snapName);
-  const snapBook = await readJsonOrNull(joinPath(snapDir, 'book.json'));
-  if (!snapBook) throw new Error('快照数据不完整');
-  // chapters 目录整体替换
-  await deleteDir(joinPath(bookDir, 'chapters'));
-  await copyTree(joinPath(snapDir, 'chapters'), joinPath(bookDir, 'chapters'));
-  await writeJson(bookPathOf(root, dirName), snapBook);
-  // 全量重建引用索引
-  const snapChapters = ((snapBook as { chapters?: { id: string }[] }).chapters ?? []).map((c) => c.id);
-  try {
-    await rebuildAllRefs(root, dirName, snapChapters.map((id) => ({ id })), async (id) => {
-      const f = await readChapter(root, dirName, id);
-      return (f?.doc as JsonValue) ?? null;
-    });
-  } catch {
-    // 索引失败不影响恢复
-  }
 }
 
 /* ---------- 导出 ---------- */
@@ -465,12 +399,25 @@ export async function composeExport(
 }
 
 /** 保存导出文件：桌面端弹保存对话框；浏览器端触发下载 */
-export async function saveExportFile(filename: string, content: string): Promise<boolean> {
+export async function exportDefaultDir(fallback: string): Promise<string> {
+  const settings = await readJsonOrNull(await appSettingsPath()) as { exportDir?: string } | null;
+  return settings?.exportDir && await exists(settings.exportDir) ? settings.exportDir : fallback;
+}
+
+export async function rememberExportDir(dir: string): Promise<void> {
+  await updateSettings({ exportDir: dir });
+}
+
+export async function saveExportFile(filename: string, content: string, fallbackDir?: string): Promise<boolean> {
   if (isDesktop) {
     const { save } = await import('@tauri-apps/plugin-dialog');
-    const path = await save({ defaultPath: filename });
+    const dir = await exportDefaultDir(fallbackDir ?? await defaultLibraryDir());
+    const path = await save({ defaultPath: joinPath(dir, filename), title: '导出稿件' });
     if (!path) return false;
     await writeText(path, content);
+    const parent = path.replace(/[\\/][^\\/]+$/, '');
+    // The file is already exported: preference errors must not report a false export failure.
+    try { await rememberExportDir(parent); } catch { /* preserve existing settings */ }
     return true;
   }
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });

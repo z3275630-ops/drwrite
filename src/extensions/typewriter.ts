@@ -35,7 +35,7 @@ export const TypewriterExtension = Extension.create<TypewriterOptions>({
                 queued = false;
                 try {
                   const coords = view.coordsAtPos(view.state.selection.head);
-                  const scroller = view.dom.closest('.editor-main') as HTMLElement | null;
+                  const scroller = view.dom.closest('.document-scroll') as HTMLElement | null;
                   if (!scroller) return;
                   const rect = scroller.getBoundingClientRect();
                   const target = rect.top + rect.height * 0.38; // 舒适区：中上部

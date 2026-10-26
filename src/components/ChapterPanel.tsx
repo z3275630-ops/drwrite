@@ -23,6 +23,8 @@ export default function ChapterPanel(props: {
   onOpenOutline: () => void;
   onOpenSynopsis: () => void;
   onJumpChapter: (chapterId: string) => void;
+  onOpenStructure: (section: 'timeline' | 'foreshadow' | 'summary') => void;
+  onCreateCharacter: () => void;
 }) {
   const meta = props.book.chapters[props.activeIndex];
   const chapterRefs = props.refs.filter((r) => r.chapterId === meta?.id);
@@ -83,6 +85,11 @@ export default function ChapterPanel(props: {
         <span className="inspector-title">本章 · 第{(meta?.index ?? 0) + 1}章</span>
       </div>
       <div className="inspector-body">
+        <nav className="chapter-shortcuts" aria-label="作品结构快捷入口">
+          <button className="ghost-btn small" onClick={() => props.onOpenStructure('foreshadow')}>伏笔</button>
+          <button className="ghost-btn small" onClick={() => props.onOpenStructure('timeline')}>时间线</button>
+          <button className="ghost-btn small" onClick={() => props.onOpenStructure('summary')}>剧情总览</button>
+        </nav>
         <div className="sec-title first">场景节拍</div>
         {props.scenes.length ? (
           <div className="scene-list">
@@ -120,7 +127,10 @@ export default function ChapterPanel(props: {
             <EntityChips list={loreList} />
           </>
         )}
-        {!chapterRefs.length && <div className="entity-sub" style={{ marginTop: 6 }}>本章还没有任何关联。</div>}
+        {!chapterRefs.length && <div className="entity-sub" style={{ marginTop: 6 }}>
+          先建人物卡，再点正文里的姓名虚线确认关联。
+          <button className="link-btn" onClick={props.onCreateCharacter}>建第一张人物卡</button>
+        </div>}
 
         {pending.length > 0 && (
           <>

@@ -58,6 +58,7 @@ export default function ChatPanel(props: {
   chapterTail: string;
   onClose: () => void;
   onNeedSettings: () => void;
+  onBusyChange: (busy: boolean) => void;
 }) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
@@ -73,6 +74,10 @@ export default function ChatPanel(props: {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadedRef = useRef(false);
+  useEffect(() => {
+    props.onBusyChange(sending);
+    return () => props.onBusyChange(false);
+  }, [sending, props.onBusyChange]);
 
   useEffect(() => {
     void loadChat(props.root, props.dirName).then((m) => {

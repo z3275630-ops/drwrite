@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Character, ChapterMeta, LoreEntry, Prop, RefIndexEntry, CharacterTier, LoreCategory, Volume } from '../types';
 import ChapterList from './ChapterList';
@@ -32,8 +32,10 @@ export default function Sidebar(props: {
   onReadAi: () => void;
   onOpenGraph: () => void;
   structure?: ReactNode;
+  structureRequest?: number;
 }) {
   const [tab, setTab] = useState<Tab>('chapters');
+  useEffect(() => { if (props.structureRequest) setTab('structure'); }, [props.structureRequest]);
   const [charQuery, setCharQuery] = useState('');
   const [tierFilter, setTierFilter] = useState<'全部' | CharacterTier>('全部');
   const [loreQuery, setLoreQuery] = useState('');

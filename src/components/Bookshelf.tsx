@@ -142,7 +142,7 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
           <span className="brand-mark" />
           <div>
             <div className="brand-name">Drwrite</div>
-            <div className="brand-sub">本地优先的写作台 · 你的字只存在你自己的电脑里</div>
+            <div className="brand-sub">稿件与资料保存在本机 · 在线 AI 仅在使用时发送所需上下文</div>
           </div>
         </div>
         {root && (

@@ -174,3 +174,18 @@ export async function appSettingsPath(): Promise<string> {
   }
   return 'C:/虚拟书库/settings.json';
 }
+
+// Serialize settings read/merge/write so export preferences cannot replace AI settings.
+let settingsQueue: Promise<unknown> = Promise.resolve();
+export function updateSettings(patch: Record<string, JsonValue>): Promise<void> {
+  const operation = settingsQueue.then(async () => {
+    const path = await appSettingsPath();
+    const previous = await exists(path) ? await readJson(path) : {};
+    if (!previous || Array.isArray(previous) || typeof previous !== 'object') {
+      throw new Error('设置文件格式错误，已停止写入以保留原设置');
+    }
+    await writeJson(path, { ...previous, ...patch });
+  });
+  settingsQueue = operation.catch(() => undefined);
+  return operation;
+}

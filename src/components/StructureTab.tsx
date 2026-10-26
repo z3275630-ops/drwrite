@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, TimelineEvent } from '../types';
 import type { TimelineData } from '../lib/structure';
 import type { SceneInfo } from '../lib/scenes';
@@ -16,6 +16,7 @@ interface AnchorSel {
 }
 
 export default function StructureTab(props: {
+  focusRequest?: { section: 'timeline' | 'foreshadow' | 'summary'; revision: number } | null;
   book: Book;
   timeline: TimelineData;
   foreshadows: Foreshadow[];
@@ -52,6 +53,16 @@ export default function StructureTab(props: {
   const [confirmFill, setConfirmFill] = useState(false);
   const [tree, setTree] = useState<loc.LocationTree | null>(null);
   const [nodeEdit, setNodeEdit] = useState<{ id: string; draft: string } | null>(null);
+  const plotRef = useRef<HTMLDivElement>(null);
+  const switchRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!props.focusRequest) return;
+    const section = props.focusRequest.section;
+    if (section !== 'summary') setSub(section);
+    requestAnimationFrame(() => {
+      (section === 'summary' ? plotRef : switchRef).current?.scrollIntoView({ block: 'start' });
+    });
+  }, [props.focusRequest]);
 
   useEffect(() => {
     void loc.loadLocations(props.root, props.dirName).then(setTree);
@@ -244,7 +255,7 @@ export default function StructureTab(props: {
 
   return (
     <div className="entity-pane">
-      <div className="plot-card">
+      <div className="plot-card" ref={plotRef}>
         <div className="plot-head">
           <span className="plot-title">剧情总览</span>
           <span className="entity-sub">
@@ -291,7 +302,7 @@ export default function StructureTab(props: {
         </div>
       </div>
 
-      <div className="struct-switch">
+      <div className="struct-switch" ref={switchRef}>
         <button className={sub === 'timeline' ? 'on' : ''} onClick={() => setSub('timeline')}>
           时间线
         </button>

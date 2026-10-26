@@ -4,7 +4,7 @@
  * 浏览器端直连 fetch（DeepSeek 等开放 CORS 的服务可用）。
  */
 import type { JsonValue } from './json';
-import { isDesktop, readJsonOrNull, writeJson, appSettingsPath } from './fs';
+import { isDesktop, readJsonOrNull, appSettingsPath, updateSettings } from './fs';
 
 export interface AiConfig {
   baseUrl: string;
@@ -47,9 +47,7 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
 }
 
 export async function saveAiConfig(cfg: AiConfig): Promise<void> {
-  const p = await appSettingsPath();
-  const v = (await readJsonOrNull(p)) as Record<string, JsonValue> | null;
-  await writeJson(p, { ...(v ?? {}), ai: cfg as unknown as JsonValue });
+  await updateSettings({ ai: cfg as unknown as JsonValue });
 }
 
 /** 调一次对话补全。错误信息面向用户可直接展示。 */

@@ -2,7 +2,7 @@
  * 上下文装配器：AI 动笔前自动带上「作品信息 + 相关设定卡 + 前文」。
  * 原则（继承自织境）：AI 不直接改正文，一切产物走提案卡确认。
  */
-import type { Book, ChapterMeta, Character, LoreEntry, Prop } from '../types';
+import type { Book, ChapterMeta, Character, LoreEntry, Prop, Foreshadow } from '../types';
 import type { AiMessage } from './ai';
 import { propHolder } from '../types';
 
@@ -21,6 +21,10 @@ const MAX_CARD_CHARS = 180;
 
 function clip(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '…' : s;
+}
+
+export function recentText(s: string, max: number): string {
+  return s.length > max ? '…' + s.slice(-max) : s;
 }
 
 /** 实体卡 → 紧凑文本行 */
@@ -83,6 +87,8 @@ export interface AssembleInput {
   chapter: ChapterMeta;
   /** 本章正文尾部（续写用长一点，改写用短一点） */
   chapterTail: string;
+  /** Nearby text after the selection; excluded from continuation. */
+  chapterAfter?: string;
   prevChapterTail?: string;
   prevSynopsis?: string;
   /** 全书滚动摘要（P5）：百万字长跑时的长期记忆 */
@@ -97,6 +103,32 @@ export interface AssembleInput {
   kind: AiTaskKind;
   custom?: string;
   targetWords?: number;
+  foreshadows?: Foreshadow[];
+}
+
+export interface ContextSource { label: string; text: string }
+
+/** The preview and the actual request consume exactly the same assembled blocks. */
+export function buildContextSources(input: AssembleInput, chars: Character[], lore: LoreEntry[], props: Prop[] = []): ContextSource[] {
+  const sources: ContextSource[] = [];
+  if (input.plotSummary) sources.push({ label: '剧情总览', text: clip(input.plotSummary, 2400) });
+  const cards = entityCardLines(chars, lore, input.relatedIds, props, input.chapter.index);
+  if (cards.length) sources.push({ label: '相关资料', text: cards.join('\n') });
+  if (input.outline) sources.push({ label: '本章章纲', text: clip(input.outline, 900) });
+  if (input.scenes?.length) sources.push({ label: '场景标记', text: clip(input.scenes.map((s, i) => `${i + 1}. ${s.title.trim() || '（未命名场景）'}`).join('\n'), 800) });
+  const index = (id: string) => input.book.chapters.find((c) => c.id === id)?.index;
+  const pending = (input.foreshadows ?? []).filter((f) => {
+    const payoff = f.payoffAnchor ? index(f.payoffAnchor.chapterId) : undefined;
+    return (payoff == null || payoff > input.chapter.index) && f.plantAnchors.some((a) => {
+      const at = index(a.chapterId); return at != null && at <= input.chapter.index;
+    });
+  }).slice(0, 12);
+  if (pending.length) sources.push({ label: '待收伏笔', text: pending.map((f) => '· ' + clip(f.title, 100)).join('\n') });
+  if (input.prevSynopsis) sources.push({ label: '上一章梗概', text: clip(input.prevSynopsis, 150) });
+  if (input.prevChapterTail) sources.push({ label: '上一章结尾', text: recentText(input.prevChapterTail, 600) });
+  if (input.chapterTail) sources.push({ label: input.kind === 'continue' ? '本章前文（最新结尾）' : '选区前文', text: recentText(input.chapterTail, input.kind === 'continue' ? 2000 : 1200) });
+  if (input.chapterAfter && input.kind !== 'continue') sources.push({ label: '选区后文', text: clip(input.chapterAfter, 600) });
+  return sources;
 }
 
 export function buildAiMessages(
@@ -118,18 +150,8 @@ export function buildAiMessages(
 
   const parts: string[] = [];
   parts.push(`【作品】《${input.book.title}》`);
-  if (input.plotSummary) parts.push('【剧情总览（截至前文）】\n' + input.plotSummary);
-  const cards = entityCardLines(chars, lore, input.relatedIds, props, input.chapter.index);
-  if (cards.length) parts.push('【设定资料】\n' + cards.join('\n'));
   parts.push(`【本章】第${input.chapter.index + 1}章 ${input.chapter.title}${input.chapter.synopsis ? '：' + clip(input.chapter.synopsis, 100) : ''}`);
-  if (input.outline) parts.push('【本章章纲（按要点推进情节）】\n' + clip(input.outline, 900));
-  if (input.scenes?.length) {
-    const beats = input.scenes.map((s, i) => `${i + 1}. ${s.title.trim() || '（未命名场景）'}`).join('\n');
-    parts.push('【本章场景节拍（按此推进，不要写出分隔线本身）】\n' + beats);
-  }
-  if (input.prevSynopsis) parts.push('【上一章梗概】' + clip(input.prevSynopsis, 150));
-  if (input.prevChapterTail) parts.push('【上一章结尾】\n' + clip(input.prevChapterTail, 600));
-  if (input.chapterTail) parts.push('【本章前文】\n' + clip(input.chapterTail, input.kind === 'continue' ? 2000 : 1200));
+  for (const source of buildContextSources(input, chars, lore, props)) parts.push(`【${source.label}】\n${source.text}`);
 
   const n = input.targetWords ?? 600;
   switch (input.kind) {
@@ -149,7 +171,7 @@ export function buildAiMessages(
       parts.push(`【任务】对【选中文本】按以下要求处理：${input.custom ?? ''}。输出替换后的完整文字。`);
       break;
     case 'continue':
-      parts.push(`【任务】自然接续【本章前文】继续写约 ${n} 字。不要重复已有内容，情节向前推进；写完自然停笔，不要写"（完）"或总结。`);
+      parts.push(`【任务】自然接续【本章前文（最新结尾）】继续写约 ${n} 字，遵守章纲与相关资料。不要重复已有内容，情节向前推进；写完自然停笔，不要写"（完）"或总结。`);
       break;
   }
   if (input.selection && input.kind !== 'continue') {

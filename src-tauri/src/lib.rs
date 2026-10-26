@@ -6,10 +6,16 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tauri::Manager;
+mod storage;
+
+fn io_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    storage::IO_LOCK.lock().map_err(|_| "文件操作未完成，请重启后重试".into())
+}
 
 /// 读一个 JSON 文件
 #[tauri::command]
 fn read_json_file(path: String) -> Result<Value, String> {
+    let _guard = io_guard()?;
     let s = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     serde_json::from_str(&s).map_err(|e| e.to_string())
 }
@@ -24,22 +30,15 @@ fn write_json_file(path: String, value: Value) -> Result<(), String> {
 /// 写纯文本文件，同样走临时文件替换
 #[tauri::command]
 fn write_text_file(path: String, content: String) -> Result<(), String> {
-    if let Some(parent) = Path::new(&path).parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = format!("{}.tmp", path);
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
-    // Windows 上 rename 不能覆盖已存在文件，先删旧的
-    if Path::new(&path).exists() {
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    let _guard = io_guard()?;
+    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+    storage::atomic_write(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// 列目录：目录项带结尾 "/"，文件不带；按名称排序
 #[tauri::command]
 fn list_dir_entries(path: String) -> Result<Vec<String>, String> {
+    let _guard = io_guard()?;
     let mut out: Vec<(bool, String)> = Vec::new();
     for entry in fs::read_dir(&path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -60,23 +59,31 @@ fn path_exists(path: String) -> bool {
 
 #[tauri::command]
 fn create_dir(path: String) -> Result<(), String> {
+    let _guard = io_guard()?;
+    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
     fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_file(path: String) -> Result<(), String> {
+    let _guard = io_guard()?;
+    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
     fs::remove_file(&path).map_err(|e| e.to_string())
 }
 
 /// 删除整个目录（删除作品 / 清理旧快照用），调用前前端必须弹确认
 #[tauri::command]
 fn delete_dir(path: String) -> Result<(), String> {
+    let _guard = io_guard()?;
+    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
     fs::remove_dir_all(&path).map_err(|e| e.to_string())
 }
 
 /// 递归复制目录（做快照 / 恢复快照用）
 #[tauri::command]
 fn copy_tree(src: String, dst: String) -> Result<(), String> {
+    let _guard = io_guard()?;
+    storage::ensure_no_pending_restore(Path::new(&dst)).map_err(|e| e.to_string())?;
     let src_path = Path::new(&src);
     if !src_path.is_dir() {
         return Err(format!("源目录不存在: {}", src));
@@ -97,6 +104,30 @@ fn copy_dir_inner(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+fn create_book_snapshot(book_dir: String, name_base: String) -> Result<String, String> {
+    let _guard = io_guard()?;
+    storage::create_snapshot(Path::new(&book_dir), &name_base).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_book_snapshots(book_dir: String) -> Result<Vec<storage::SnapshotInfo>, String> {
+    let _guard = io_guard()?;
+    storage::list_snapshots(Path::new(&book_dir)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn restore_book_snapshot(book_dir: String, name: String) -> Result<bool, String> {
+    let _guard = io_guard()?;
+    storage::restore_snapshot(Path::new(&book_dir), &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn recover_book_restore(book_dir: String) -> Result<bool, String> {
+    let _guard = io_guard()?;
+    storage::recover_restore(Path::new(&book_dir)).map_err(|e| e.to_string())
 }
 
 /// 默认书库位置：文档\Drwrite 书库
@@ -317,6 +348,10 @@ pub fn run() {
             delete_file,
             delete_dir,
             copy_tree,
+            create_book_snapshot,
+            list_book_snapshots,
+            restore_book_snapshot,
+            recover_book_restore,
             default_library_dir,
             app_settings_path,
             ai_chat,

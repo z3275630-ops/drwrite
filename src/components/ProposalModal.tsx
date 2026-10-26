@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Modal } from './Modal';
+import type { ContextSource } from '../lib/assembler';
 
 export type ProposalPhase = 'streaming' | 'done' | 'error';
 
@@ -17,6 +18,7 @@ export interface ProposalState {
   startedAt: number;
   /** 花了多少 token（完成时显示） */
   usage?: string;
+  contextSources?: ContextSource[];
 }
 
 /**
@@ -67,6 +69,11 @@ export default function ProposalModal(props: {
         {s.phase === 'done' && s.usage && <span className="prop-status ok">{s.usage}</span>}
         {s.phase === 'error' && <span className="prop-status err">失败</span>}
       </div>
+      {!!s.contextSources?.length && <details className="context-preview">
+        <summary>已带入：{s.contextSources.map((source) => source.label).join(' · ')}</summary>
+        {s.contextSources.map((source) => <section key={source.label}><b>{source.label}</b><pre>{source.text}</pre></section>)}
+        <p className="hint-text">这里只显示本次实际带入的片段；长度单位为字符，接口返回的 tokens 才是模型用量。</p>
+      </details>}
 
       {s.phase === 'streaming' && (
         <div className="prop-stream">

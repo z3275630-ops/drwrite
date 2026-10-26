@@ -9,7 +9,7 @@ import type { JsonValue } from '../lib/json';
 import { countWords, docToPlainText } from '../lib/words';
 import { loadAiConfig, chatAi } from '../lib/ai';
 import type { AiConfig } from '../lib/ai';
-import { buildAiMessages, TASK_LABELS } from '../lib/assembler';
+import { buildAiMessages, buildContextSources, TASK_LABELS } from '../lib/assembler';
 import type { AiTaskKind } from '../lib/assembler';
 import * as lib from '../lib/library';
 import { cnNum } from '../lib/cnnum';
@@ -50,6 +50,7 @@ import type { TimelineData } from '../lib/structure';
 import * as st from '../lib/structure';
 import { entityCardLines } from '../lib/assembler';
 import { writeText, joinPath, isDesktop } from '../lib/fs';
+import { SaveCoordinator, SerialQueue } from '../lib/saveCoordinator';
 
 const p2 = (n: number) => String(n).padStart(2, '0');
 
@@ -81,20 +82,31 @@ export default function Editor(props: {
   onExit: () => void;
 }) {
   const { root, dirName } = props;
-  const [book, setBook] = useState<Book | null>(null);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<'saved' | 'dirty' | 'saving'>('saved');
+  const bookRef = useRef<Book | null>(null);
+  const [book, setBookState] = useState<Book | null>(null);
+  const setBook = useCallback((value: Book | null) => { bookRef.current = value; setBookState(value); }, []);
+  const activeIdRef = useRef<string | null>(null);
+  const [activeId, setActiveIdState] = useState<string | null>(null);
+  const setActiveId = useCallback((value: string | null) => { activeIdRef.current = value; setActiveIdState(value); }, []);
+  const [saveState, setSaveState] = useState<'saved' | 'dirty' | 'saving' | 'error'>('saved');
+  const [saveError, setSaveError] = useState('');
+  const [storageWarning, setStorageWarning] = useState('');
   const [lastSaved, setLastSaved] = useState('');
   const [liveWords, setLiveWords] = useState(0);
   const [editorEmpty, setEditorEmpty] = useState(true);
   const [renamingBook, setRenamingBook] = useState(false);
   const [bookTitleDraft, setBookTitleDraft] = useState('');
   const [menu, setMenu] = useState<'export' | null>(null);
-  const [snapshots, setSnapshots] = useState<string[]>([]);
+  const [snapshots, setSnapshots] = useState<lib.SnapshotInfo[]>([]);
   const [snapPanelOpen, setSnapPanelOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ChapterMeta | null>(null);
-  const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<lib.SnapshotInfo | null>(null);
+  const busyRef = useRef(false);
+  const [busy, setBusyState] = useState(false);
+  const setBusy = useCallback((value: boolean) => { busyRef.current = value; setBusyState(value); }, []);
+  const [restoredEpoch, setRestoredEpoch] = useState(0);
+  const [chatSending, setChatSending] = useState(false);
+  const [structureRequest, setStructureRequest] = useState<{ section: 'timeline' | 'foreshadow' | 'summary'; revision: number } | null>(null);
 
   /* ---------- P5：排版 / 专注 / 素材箱 / 章纲 / 分卷 ---------- */
   const [prefs, setPrefs] = useState<lib.EditorPrefs>(lib.DEFAULT_PREFS);
@@ -132,8 +144,10 @@ export default function Editor(props: {
   const [selMenu, setSelMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [selCustom, setSelCustom] = useState('');
   const [proposal, setProposal] = useState<ProposalState | null>(null);
-  const pendingAiRef = useRef<{ kind: AiTaskKind; custom?: string; range?: { from: number; to: number } } | null>(null);
+  const pendingAiRef = useRef<{ kind: AiTaskKind; custom?: string; range?: { from: number; to: number }; chapterId: string; originalDoc: string } | null>(null);
   const rerunAiRef = useRef<(() => void) | null>(null);
+  const aiRequestRef = useRef(0);
+  const closeProposal = () => { aiRequestRef.current++; setProposal(null); };
 
   /* ---------- P3：时间线 / 伏笔 / AI 巡检 ---------- */
   const [timeline, setTimeline] = useState<TimelineData>({ lanes: [], events: [] });
@@ -145,7 +159,10 @@ export default function Editor(props: {
     (document.body.dataset.theme as 'light' | 'dark') ?? 'light'
   );
 
-  const dirtyRef = useRef(false);
+  const saver = useRef(new SaveCoordinator()).current;
+  const navigatingRef = useRef(false);
+  const diskQueue = useRef(new SerialQueue()).current;
+  const pendingBookEdit = useRef<((current: Book) => Book) | null>(null);
   const timerRef = useRef<number | undefined>(undefined);
   const switchingRef = useRef(false);
   const hintRef = useRef<HintEntity[]>([]);
@@ -156,7 +173,7 @@ export default function Editor(props: {
   zenRef.current = zen;
   const typewriterRef = useRef(false);
   /** 关窗钩子随时要拿到最新的 flushSave */
-  const flushRef = useRef<() => Promise<void>>(async () => {});
+  const flushRef = useRef<() => Promise<boolean>>(async () => true);
   /** 编辑器事件处理器走 ref 转发，永远拿到最新闭包 */
   const handlersRef = useRef<{
     onUpdate?: (ed: TipTapEditor) => void;
@@ -210,6 +227,10 @@ export default function Editor(props: {
     },
     onUpdate: ({ editor: ed }) => handlersRef.current.onUpdate?.(ed),
   });
+  const editorInstanceRef = useRef(editor);
+  editorInstanceRef.current = editor;
+
+  useEffect(() => { editor?.setEditable(!!activeId && !busy, false); }, [editor, activeId, busy]);
 
   /* ---------- 保存 ---------- */
 
@@ -221,34 +242,50 @@ export default function Editor(props: {
     }
   }, [root, dirName]);
 
-  const flushSave = useCallback(async () => {
+  const flushSave = useCallback(async (): Promise<boolean> => {
     window.clearTimeout(timerRef.current);
-    if (!dirtyRef.current || !book || !activeId || !editor) return;
-    dirtyRef.current = false;
+    await diskQueue.idle();
+    if (!saver.dirty && !saver.saving && !pendingBookEdit.current) return true;
     setSaveState('saving');
-    const meta = book.chapters.find((c) => c.id === activeId);
-    if (!meta) {
-      setSaveState('saved');
-      return;
-    }
-    const file: ChapterFile = {
-      protocolVersion: MODEL_VERSION,
-      meta: { ...meta },
-      doc: editor.getJSON() as unknown as JsonValue,
-    };
-    try {
-      const next = await lib.saveChapterWithStats(root, dirName, book, file);
+    let success = await saver.flush(() => diskQueue.run(async () => {
+      const current = bookRef.current;
+      const id = activeIdRef.current;
+      const meta = current?.chapters.find((c) => c.id === id);
+      if (!current || !meta || !editor) throw new Error('当前章节未就绪，稿件仍保留在编辑器中');
+      const file: ChapterFile = {
+        protocolVersion: MODEL_VERSION, meta: { ...meta },
+        doc: editor.getJSON() as unknown as JsonValue,
+      };
+      setStorageWarning('');
+      const next = await lib.saveChapterWithStats(root, dirName, current, file, setStorageWarning);
       setBook(next);
+    }));
+    if (success && pendingBookEdit.current) {
+      try {
+        await diskQueue.run(async () => {
+          const update = pendingBookEdit.current;
+          if (!update || !bookRef.current) return;
+          const next = update(bookRef.current);
+          next.stats = { ...next.stats, totalWords: next.chapters.reduce((n, c) => n + c.wordCount, 0) };
+          await lib.saveBook(root, dirName, next);
+          setBook(next);
+          pendingBookEdit.current = null;
+        });
+      } catch (error) { saver.error = error; success = false; }
+    }
+    if (success) {
+      setSaveError('');
       setSaveState('saved');
       void refreshRefs();
       const d = new Date();
       setLastSaved(`${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`);
-    } catch (e) {
-      dirtyRef.current = true;
-      setSaveState('dirty');
-      toast('保存失败：' + String(e), 'err');
+    } else {
+      const detail = String(saver.error instanceof Error ? saver.error.message : saver.error);
+      setSaveError('保存失败，稿件仍留在当前章。' + detail);
+      setSaveState('error');
     }
-  }, [book, activeId, editor, root, dirName, refreshRefs]);
+    return success;
+  }, [editor, root, dirName, refreshRefs, saver, setBook, diskQueue]);
   flushRef.current = flushSave;
 
   /**
@@ -270,12 +307,13 @@ export default function Editor(props: {
       setLiveWords(words);
       setEditorEmpty(editor.isEmpty);
       setSaveState('saved');
-      dirtyRef.current = false;
+      saver.reset();
+      setSaveError('');
       setAtPopup(null);
       setHintPop(null);
       setScenes(scenesFromDocJson(doc));
     },
-    [editor]
+    [editor, saver]
   );
 
   /* ---------- 场景层（P6） ---------- */
@@ -408,7 +446,7 @@ export default function Editor(props: {
 
   handlersRef.current.onUpdate = (ed: TipTapEditor) => {
     if (switchingRef.current) return;
-    dirtyRef.current = true;
+    saver.markDirty();
     setSaveState('dirty');
     setLiveWords(countWords(ed.getText()));
     setEditorEmpty(ed.isEmpty);
@@ -540,12 +578,12 @@ export default function Editor(props: {
       return;
     }
     const { open } = await import('@tauri-apps/plugin-dialog');
-    const dir = await open({ directory: true, title: '选择导出位置（每章一个 TXT）' });
+    const dir = await open({ directory: true, title: '选择导出位置（每章一个 TXT）', defaultPath: await lib.exportDefaultDir(root) });
     if (typeof dir !== 'string') return;
     try {
-      await flushSave();
+      if (!(await flushSave())) return;
       let n = 0;
-      for (const m of book.chapters) {
+      for (const m of bookRef.current!.chapters) {
         const f = await lib.readChapter(root, dirName, m.id);
         if (!f) continue;
         const body = docToPlainText(f.doc as never);
@@ -553,6 +591,7 @@ export default function Editor(props: {
         await writeText(joinPath(dir, name), `第${m.index + 1}章 ${m.title}\n\n${body}\n`);
         n++;
       }
+      try { await lib.rememberExportDir(dir); } catch { /* exported content is safe */ }
       toast(`已导出 ${n} 个 TXT 文件`);
     } catch (e) {
       toast('导出失败：' + String(e), 'err');
@@ -568,9 +607,9 @@ export default function Editor(props: {
         return;
       }
       setBook(b);
-      void reloadEntities();
-      void refreshRefs();
-    })();
+      await reloadEntities();
+      await refreshRefs();
+    })().catch((error) => setSaveError('作品读取失败：' + String(error)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root, dirName]);
 
@@ -580,9 +619,10 @@ export default function Editor(props: {
     const first = book.chapters[0];
     void (async () => {
       const f = await lib.readChapter(root, dirName, first.id);
-      loadChapterInto(f?.doc ?? lib.emptyDoc(), first.wordCount);
+      if (!f) throw new Error('章节文件缺失，请从快照恢复；不会以空白覆盖');
+      loadChapterInto(f.doc, f.meta.wordCount);
       setActiveId(first.id);
-    })();
+    })().catch((error) => setSaveError('章节读取失败：' + String(error)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, book, activeId]);
 
@@ -627,11 +667,24 @@ export default function Editor(props: {
           e.preventDefault();
           if (closing) return;
           closing = true;
-          // 本地落盘正常是毫秒级；万一卡住也不能让窗口关不掉
-          await Promise.race([
-            flushRef.current().catch(() => undefined),
-            new Promise((r) => setTimeout(r, 2500)),
+          if (busyRef.current) {
+            closing = false;
+            setSaveError('备份或恢复尚未完成，已取消关闭。请稍后重试。');
+            return;
+          }
+          editorInstanceRef.current?.setEditable(false, false);
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const saved = await Promise.race([
+            flushRef.current(),
+            new Promise<boolean>((resolve) => { timeout = setTimeout(() => resolve(false), 10000); }),
           ]);
+          clearTimeout(timeout);
+          if (!saved) {
+            closing = false;
+            editorInstanceRef.current?.setEditable(activeIdRef.current != null, false);
+            setSaveError((previous) => previous || '保存尚未完成，已取消关闭。请重试保存或另存正文。');
+            return;
+          }
           try {
             await win.destroy();
           } catch {
@@ -641,6 +694,7 @@ export default function Editor(props: {
               await invoke('quit_app');
             } catch {
               closing = false;
+              editorInstanceRef.current?.setEditable(activeIdRef.current != null, false);
             }
           }
         });
@@ -681,58 +735,77 @@ export default function Editor(props: {
 
   /* ---------- 章节操作 ---------- */
 
-  const switchChapter = async (id: string) => {
-    if (id === activeId) return;
-    await flushSave();
-    const f = await lib.readChapter(root, dirName, id);
-    loadChapterInto(f?.doc ?? lib.emptyDoc(), f?.meta.wordCount ?? 0);
-    setActiveId(id);
-  };
-
-  /** 跳到某章（可选：直接滚到该章的某个场景） */
-  const jumpToChapter = async (id: string, blockIndex?: number) => {
-    setInspector(null);
-    setSearchOpen(false);
-    if (id !== activeId) {
-      await flushSave();
-      const f = await lib.readChapter(root, dirName, id);
-      loadChapterInto(f?.doc ?? lib.emptyDoc(), f?.meta.wordCount ?? 0);
+  const switchChapter = async (id: string): Promise<boolean> => {
+    if (id === activeIdRef.current) return true;
+    if (navigatingRef.current) return false;
+    navigatingRef.current = true;
+    editor?.setEditable(false, false);
+    try {
+      if (!(await flushSave())) return false;
+      const file = await lib.readChapter(root, dirName, id);
+      if (!file) throw new Error('章节文件缺失，已保留当前稿件');
+      loadChapterInto(file.doc, file.meta.wordCount);
       setActiveId(id);
-      if (blockIndex != null) window.setTimeout(() => jumpToScene(blockIndex), 60);
-    } else if (blockIndex != null) {
-      jumpToScene(blockIndex);
+      return true;
+    } catch (error) {
+      setSaveError('无法切章：' + String(error));
+      return false;
+    } finally {
+      navigatingRef.current = false;
+      editor?.setEditable(activeIdRef.current != null, false);
     }
   };
 
-  const persistBook = async (next: Book) => {
-    await lib.saveBook(root, dirName, next);
-    setBook({ ...next });
+  const jumpToChapter = async (id: string, blockIndex?: number) => {
+    if (!(await switchChapter(id))) return;
+    setInspector(null);
+    setSearchOpen(false);
+    if (blockIndex != null) requestAnimationFrame(() => jumpToScene(blockIndex));
+  };
+
+  const persistBook = async (update: (current: Book) => Book): Promise<boolean> => {
+    if (!(await flushSave())) return false;
+    try {
+      await diskQueue.run(async () => {
+        const current = bookRef.current;
+        if (!current) throw new Error('作品尚未加载');
+        const next = update(current);
+        next.stats = { ...next.stats, totalWords: next.chapters.reduce((n, c) => n + c.wordCount, 0) };
+        await lib.saveBook(root, dirName, next);
+        setBook(next);
+      });
+      return true;
+    } catch (error) {
+      pendingBookEdit.current = update;
+      setSaveError('作品目录未保存：' + String(error));
+      return false;
+    }
   };
 
   const addChapter = async () => {
-    if (!book) return;
-    await flushSave();
-    const meta: ChapterMeta = {
-      id: lib.genId(),
-      index: book.chapters.length,
-      title: `第${cnNum(book.chapters.length + 1)}章`,
-      wordCount: 0,
-      createdAt: lib.nowIso(),
-      updatedAt: lib.nowIso(),
-    };
-    await lib.writeChapter(root, dirName, lib.newChapterFile(meta));
-    await persistBook({ ...book, chapters: [...book.chapters, meta] });
-    loadChapterInto(lib.emptyDoc(), 0);
-    setActiveId(meta.id);
+    if (!book || navigatingRef.current) return;
+    navigatingRef.current = true;
+    editor?.setEditable(false, false);
+    try {
+      if (!(await flushSave())) return;
+      const current = bookRef.current!;
+      const meta: ChapterMeta = {
+        id: lib.genId(), index: current.chapters.length,
+        title: `第${cnNum(current.chapters.length + 1)}章`, wordCount: 0,
+        createdAt: lib.nowIso(), updatedAt: lib.nowIso(),
+      };
+      await lib.writeChapter(root, dirName, lib.newChapterFile(meta));
+      if (!(await persistBook((b) => ({ ...b, chapters: [...b.chapters, meta] })))) return;
+      loadChapterInto(lib.emptyDoc(), 0);
+      setActiveId(meta.id);
+    } catch (error) { setSaveError('新建章节失败：' + String(error)); }
+    finally { navigatingRef.current = false; editor?.setEditable(activeIdRef.current != null, false); }
   };
 
   const renameChapter = async (id: string, title: string) => {
     if (!book) return;
-    await flushSave();
-    await persistBook({
-      ...book,
-      chapters: book.chapters.map((c) => (c.id === id ? { ...c, title } : c)),
-    });
+    if (!(await flushSave())) return;
+    await persistBook((b) => ({ ...b, chapters: b.chapters.map((c) => (c.id === id ? { ...c, title } : c)) }));
   };
 
   /* ---------- 正文顶栏：章节名 / 翻页 / 撤销重做 ---------- */
@@ -763,57 +836,45 @@ export default function Editor(props: {
 
   const moveChapter = async (id: string, dir: -1 | 1) => {
     if (!book) return;
-    await flushSave();
+    if (!(await flushSave())) return;
     const i = book.chapters.findIndex((c) => c.id === id);
     const j = i + dir;
     if (i < 0 || j < 0 || j >= book.chapters.length) return;
     const arr = [...book.chapters];
     [arr[i], arr[j]] = [arr[j], arr[i]];
-    await persistBook({ ...book, chapters: arr.map((c, idx) => ({ ...c, index: idx })) });
+    await persistBook((b) => ({ ...b, chapters: arr.map((c, idx) => ({ ...b.chapters.find((x) => x.id === c.id)!, volumeId: c.volumeId, index: idx })) }));
   };
 
   /* ---------- 分卷（P5） ---------- */
 
   const addVolume = async (title: string) => {
     if (!book) return;
-    await persistBook({ ...book, volumes: [...(book.volumes ?? []), { id: lib.genId(), title }] });
+    await persistBook((b) => ({ ...b, volumes: [...(b.volumes ?? []), { id: lib.genId(), title }] }));
   };
 
   const renameVolume = async (id: string, title: string) => {
     if (!book) return;
-    await persistBook({
-      ...book,
-      volumes: (book.volumes ?? []).map((v) => (v.id === id ? { ...v, title } : v)),
-    });
+    await persistBook((b) => ({ ...b, volumes: (b.volumes ?? []).map((v) => (v.id === id ? { ...v, title } : v)) }));
   };
 
   const doDeleteVolume = async () => {
     const v = deleteVol;
     if (!v || !book) return;
     setDeleteVol(null);
-    await persistBook({
-      ...book,
-      volumes: (book.volumes ?? []).filter((x) => x.id !== v.id),
-      chapters: book.chapters.map((c) => (c.volumeId === v.id ? { ...c, volumeId: undefined } : c)),
-    });
+    if (!(await persistBook((b) => ({ ...b, volumes: (b.volumes ?? []).filter((x) => x.id !== v.id), chapters: b.chapters.map((c) => (c.volumeId === v.id ? { ...c, volumeId: undefined } : c)) })))) return;
     toast(`已删除卷「${v.title}」，章节保留在未分卷`);
   };
 
   /** 拖到卷头：只改归属，不动顺序 */
   const dropToVolume = async (chapterId: string, volumeId: string | null) => {
     if (!book) return;
-    await persistBook({
-      ...book,
-      chapters: book.chapters.map((c) =>
-        c.id === chapterId ? { ...c, volumeId: volumeId ?? undefined } : c
-      ),
-    });
+    await persistBook((b) => ({ ...b, chapters: b.chapters.map((c) => c.id === chapterId ? { ...c, volumeId: volumeId ?? undefined } : c) }));
   };
 
   /** 拖拽排序：挪到目标章前/后；跨卷拖拽顺带改卷归属 */
   const reorderChapter = async (dragId: string, targetId: string, pos: 'before' | 'after') => {
     if (!book || dragId === targetId) return;
-    await flushSave();
+    if (!(await flushSave())) return;
     const dragged = book.chapters.find((c) => c.id === dragId);
     const target = book.chapters.find((c) => c.id === targetId);
     if (!dragged || !target) return;
@@ -821,40 +882,42 @@ export default function Editor(props: {
     const ti = arr.findIndex((c) => c.id === targetId);
     const at = pos === 'before' ? ti : ti + 1;
     arr.splice(at, 0, { ...dragged, volumeId: target.volumeId });
-    await persistBook({ ...book, chapters: arr.map((c, idx) => ({ ...c, index: idx })) });
+    await persistBook((b) => ({ ...b, chapters: arr.map((c, idx) => ({ ...b.chapters.find((x) => x.id === c.id)!, volumeId: c.volumeId, index: idx })) }));
   };
 
   const doDeleteChapter = async () => {
     const meta = deleteTarget;
-    if (!meta || !book) return;
-    setDeleteTarget(null);
-    await flushSave();
-    const rest = book.chapters.filter((c) => c.id !== meta.id).map((c, idx) => ({ ...c, index: idx }));
-    const next: Book = {
-      ...book,
-      chapters: rest,
-      stats: { ...book.stats, totalWords: rest.reduce((s, c) => s + c.wordCount, 0) },
-    };
-    await lib.deleteChapterFile(root, dirName, meta.id);
-    await ent.updateRefsForChapter(root, dirName, meta.id, null);
-    void refreshRefs();
-    await persistBook(next);
-    if (activeId === meta.id && rest.length) {
-      const idx = Math.min(meta.index, rest.length - 1);
-      const target = rest[idx];
-      const f = await lib.readChapter(root, dirName, target.id);
-      loadChapterInto(f?.doc ?? lib.emptyDoc(), target.wordCount);
-      setActiveId(target.id);
-    }
-    toast('已删除该章');
+    if (!meta || !book || navigatingRef.current) return;
+    navigatingRef.current = true;
+    editor?.setEditable(false, false);
+    try {
+      if (!(await flushSave())) return;
+      const rest = bookRef.current!.chapters.filter((c) => c.id !== meta.id).map((c, index) => ({ ...c, index }));
+      const target = rest[Math.min(meta.index, rest.length - 1)];
+      const targetFile = activeIdRef.current === meta.id && target ? await lib.readChapter(root, dirName, target.id) : null;
+      if (activeIdRef.current === meta.id && target && !targetFile) throw new Error('下一章文件缺失');
+      // Make a verified recovery point; update the directory before removing the old file.
+      await lib.createSnapshot(root, dirName);
+      if (!(await persistBook((b) => ({ ...b, chapters: rest.map((c) => ({ ...b.chapters.find((x) => x.id === c.id)!, index: c.index })) })))) return;
+      setDeleteTarget(null);
+      if (activeIdRef.current === meta.id) {
+        loadChapterInto(targetFile?.doc ?? lib.emptyDoc(), targetFile?.meta.wordCount ?? 0);
+        setActiveId(target?.id ?? null);
+      }
+      await lib.deleteChapterFile(root, dirName, meta.id);
+      await ent.updateRefsForChapter(root, dirName, meta.id, null);
+      void refreshRefs();
+      toast('已删除该章，删除前已留快照');
+    } catch (error) { setSaveError('删除未完成：' + String(error)); }
+    finally { navigatingRef.current = false; editor?.setEditable(activeIdRef.current != null, false); }
   };
 
   /* ---------- 书名 ---------- */
 
   const commitBookTitle = async () => {
     if (book && bookTitleDraft.trim() && bookTitleDraft.trim() !== book.title) {
-      await flushSave();
-      await persistBook({ ...book, title: bookTitleDraft.trim() });
+      if (!(await flushSave())) return;
+      if (!(await persistBook((b) => ({ ...b, title: bookTitleDraft.trim() })))) return;
     }
     setRenamingBook(false);
   };
@@ -893,19 +956,30 @@ export default function Editor(props: {
   const doExport = async (format: 'md' | 'txt', scope: 'all' | 'current') => {
     if (!book) return;
     setMenu(null);
-    await flushSave();
+    if (!(await flushSave())) return;
     if (scope === 'current' && !activeId) return;
     try {
-      const { filename, content } = await lib.composeExport(root, dirName, book, {
+      const { filename, content } = await lib.composeExport(root, dirName, bookRef.current!, {
         format,
         scope,
         chapterId: activeId ?? undefined,
       });
-      const ok = await lib.saveExportFile(filename, content);
+      const ok = await lib.saveExportFile(filename, content, root);
       if (ok) toast('已导出：' + filename);
     } catch (e) {
       toast('导出失败：' + String(e), 'err');
     }
+  };
+
+  // Intentionally bypasses the normal-save gate: this is a rescue copy of live text.
+  const rescueDraft = async () => {
+    if (!editor || !bookRef.current) return;
+    try {
+      const chapter = bookRef.current.chapters.find((c) => c.id === activeIdRef.current);
+      const filename = `${lib.safeName(bookRef.current.title)}-${lib.safeName(chapter?.title ?? '当前稿件')}-救援副本.txt`;
+      const text = editor.getText({ blockSeparator: '\n\n' });
+      if (await lib.saveExportFile(filename, text, root)) toast('当前正文已另存为救援副本；原章仍保留，确认后再关闭。');
+    } catch (error) { setSaveError('救援副本未写出：' + String(error)); }
   };
 
   /* ---------- 快照 ---------- */
@@ -914,6 +988,9 @@ export default function Editor(props: {
     setBusy(true);
     try {
       setSnapshots(await lib.listSnapshots(root, dirName));
+    } catch (error) {
+      toast('无法读取快照：' + String(error), 'err');
+      return;
     } finally {
       setBusy(false);
     }
@@ -921,12 +998,14 @@ export default function Editor(props: {
   };
 
   const doSnapshot = async () => {
+    if (chatSending) { toast('顾问正在生成，请等完成后再备份。', 'err'); return; }
     setBusy(true);
     try {
-      await flushSave();
+      if (!(await flushSave())) return;
       const name = await lib.createSnapshot(root, dirName);
       setSnapshots(await lib.listSnapshots(root, dirName));
-      toast('已备份（' + name + '）');
+      setStorageWarning('');
+      toast('已备份正文与资料（' + name + '）');
     } catch (e) {
       toast('备份失败：' + String(e), 'err');
     } finally {
@@ -935,26 +1014,39 @@ export default function Editor(props: {
   };
 
   const doRestore = async (name: string) => {
+    if (chatSending) { toast('顾问正在生成，请等完成后再恢复。', 'err'); return; }
     setRestoreTarget(null);
     setSnapPanelOpen(false);
     setBusy(true);
     try {
-      await flushSave();
+      if (!(await flushSave())) return;
       await lib.restoreSnapshot(root, dirName, name);
+      setChatOpen(false);
+      setNotesOpen(false);
+      setInspector(null);
+      setEditing(null);
+      setRestoredEpoch((epoch) => epoch + 1);
+      await reloadEntities();
       const b = await lib.loadBook(root, dirName);
       if (b) {
         setBook(b);
         const first = b.chapters[0];
         if (first) {
           const f = await lib.readChapter(root, dirName, first.id);
-          loadChapterInto(f?.doc ?? lib.emptyDoc(), first.wordCount);
+          if (!f) throw new Error('恢复后的章节缺失');
+          loadChapterInto(f.doc, f.meta.wordCount);
           setActiveId(first.id);
+        } else {
+          loadChapterInto(lib.emptyDoc(), 0);
+          setActiveId(null);
         }
+        await ent.rebuildAllRefs(root, dirName, b.chapters, async (id) => (await lib.readChapter(root, dirName, id))?.doc ?? null);
       }
-      void refreshRefs();
-      toast('已恢复；恢复前的内容自动另存了一份快照');
+      await refreshRefs();
+      setStorageWarning('');
+      toast('已恢复；恢复前的完整作品已另存快照');
     } catch (e) {
-      toast('恢复失败：' + String(e), 'err');
+      setSaveError('恢复未完成：' + String(e));
     } finally {
       setBusy(false);
     }
@@ -1015,10 +1107,12 @@ export default function Editor(props: {
       : fullText;
     const relatedIds = [...new Set(refs.filter((r) => r.chapterId === activeId).map((r) => r.targetId))];
 
-    pendingAiRef.current = { kind, custom, range };
+    pendingAiRef.current = { kind, custom, range, chapterId: activeId, originalDoc: JSON.stringify(editor.getJSON()) };
     const cfg = aiCfg;
 
-      const runOnce = () => {
+    const runOnce = () => {
+      const requestId = ++aiRequestRef.current;
+      const currentRequest = () => aiRequestRef.current === requestId && activeIdRef.current === activeId;
       setProposal({
         phase: 'streaming',
         title: TASK_LABELS[kind] + (kind === 'custom' && custom ? '：' + clipText(custom, 12) : ''),
@@ -1040,25 +1134,20 @@ export default function Editor(props: {
               prevTail = pf ? docToPlainText(pf.doc as never).slice(-500) : undefined;
             }
           }
-          const messages = buildAiMessages(
-            {
-              book,
-              chapter: meta,
-              chapterTail,
-              prevChapterTail: prevTail,
-              prevSynopsis,
-              plotSummary: kind === 'continue' ? book.plotSummary : undefined,
-              outline: kind === 'continue' ? meta.outline : undefined,
-              scenes: kind === 'continue' ? scenes : undefined,
-              selection,
-              relatedIds,
-              kind,
-              custom,
-            },
-            chars,
-            lore,
-            propEnts
-          );
+          if (!currentRequest()) return;
+          const input = {
+            book, chapter: meta, chapterTail,
+            chapterAfter: range ? editor.state.doc.textBetween(range.to, editor.state.doc.content.size, '\n') : undefined,
+            prevChapterTail: prevTail, prevSynopsis,
+            plotSummary: kind === 'continue' ? book.plotSummary : undefined,
+            outline: kind === 'continue' ? meta.outline : undefined,
+            scenes: kind === 'continue' ? scenes : undefined,
+            foreshadows: kind === 'continue' ? foreshadows : undefined,
+            selection, relatedIds, kind, custom,
+          };
+          const sources = buildContextSources(input, chars, lore, propEnts);
+          setProposal((p) => p ? { ...p, contextSources: sources } : p);
+          const messages = buildAiMessages(input, chars, lore, propEnts);
           const maxTokens =
             kind === 'continue' ? 1500 : Math.min(2200, Math.max(400, Math.round((selection?.length ?? 200) * 3)));
           const r = await chatAi(
@@ -1066,10 +1155,11 @@ export default function Editor(props: {
             messages,
             { maxTokens, temperature: kind === 'continue' ? 0.9 : 0.7 },
             {
-              onContent: (full) => setProposal((p) => (p ? { ...p, streamingText: full } : p)),
-              onReasoning: (n) => setProposal((p) => (p ? { ...p, reasoningChars: n } : p)),
+              onContent: (full) => { if (currentRequest()) setProposal((p) => (p ? { ...p, streamingText: full } : p)); },
+              onReasoning: (n) => { if (currentRequest()) setProposal((p) => (p ? { ...p, reasoningChars: n } : p)); },
             }
           );
+          if (!currentRequest()) return;
           setProposal((p) =>
             p
               ? {
@@ -1081,6 +1171,7 @@ export default function Editor(props: {
               : p
           );
         } catch (e) {
+          if (!currentRequest()) return;
           setProposal((p) =>
             p ? { ...p, phase: 'error', error: String(e instanceof Error ? e.message : e) } : p
           );
@@ -1095,6 +1186,9 @@ export default function Editor(props: {
     const p = proposal;
     const t = pendingAiRef.current;
     if (!p?.aiText || !editor || !t) return;
+    if (t.chapterId !== activeIdRef.current || JSON.stringify(editor.getJSON()) !== t.originalDoc) {
+      toast('正文已变动，请重新生成提案，避免覆盖新写的内容。', 'err'); return;
+    }
     const paras = p.aiText
       .split(/\n+/)
       .map((s) => s.trim())
@@ -1124,10 +1218,8 @@ export default function Editor(props: {
 
   const saveSynopsis = async () => {
     if (!synModal || !book) return;
-    const chapters = book.chapters.map((c) =>
-      c.id === synModal.meta.id ? { ...c, synopsis: synModal.draft.trim() || undefined } : c
-    );
-    await persistBook({ ...book, chapters });
+    const { meta, draft } = synModal;
+    if (!(await persistBook((b) => ({ ...b, chapters: b.chapters.map((c) => c.id === meta.id ? { ...c, synopsis: draft.trim() || undefined } : c) })))) return;
     setSynModal(null);
     toast('梗概已保存');
   };
@@ -1198,10 +1290,8 @@ export default function Editor(props: {
 
   const saveOutline = async () => {
     if (!outlineModal || !book) return;
-    const chapters = book.chapters.map((c) =>
-      c.id === outlineModal.meta.id ? { ...c, outline: outlineModal.draft.trim() || undefined } : c
-    );
-    await persistBook({ ...book, chapters });
+    const { meta, draft } = outlineModal;
+    if (!(await persistBook((b) => ({ ...b, chapters: b.chapters.map((c) => c.id === meta.id ? { ...c, outline: draft.trim() || undefined } : c) })))) return;
     setOutlineModal(null);
     toast('章纲已保存，续写时 AI 会按纲推进');
   };
@@ -1276,7 +1366,7 @@ export default function Editor(props: {
         { maxTokens: 2000, temperature: 0.4 }
       );
       const lastIdx = targets[targets.length - 1].index + 1;
-      await persistBook({ ...book, plotSummary: r.text, plotSummaryUpto: lastIdx, plotSummaryAt: lib.nowIso() });
+      if (!(await persistBook((b) => ({ ...b, plotSummary: r.text, plotSummaryUpto: lastIdx, plotSummaryAt: lib.nowIso() })))) return;
       toast(`剧情总览已更新，覆盖前 ${lastIdx} 章`);
     } catch (e) {
       toast(String(e instanceof Error ? e.message : e), 'err');
@@ -1285,22 +1375,20 @@ export default function Editor(props: {
 
   const savePlotSummary = (text: string) => {
     if (!book) return;
-    void persistBook({ ...book, plotSummary: text || undefined });
+    void persistBook((b) => ({ ...b, plotSummary: text || undefined }));
   };
 
   const fillMissingSynopses = async (onProgress: (done: number, total: number) => void) => {
     if (!aiCfg || !book) return;
     const targets = book.chapters.filter((c) => c.wordCount > 0 && !c.synopsis);
     if (!targets.length) return;
-    let cur = book;
     let done = 0;
     for (const m of targets) {
       done++;
       onProgress(done, targets.length);
       try {
         const syn = await synopsisTextFor(m);
-        cur = { ...cur, chapters: cur.chapters.map((c) => (c.id === m.id ? { ...c, synopsis: syn } : c)) };
-        await persistBook(cur);
+        if (!(await persistBook((b) => ({ ...b, chapters: b.chapters.map((c) => c.id === m.id && !c.synopsis ? { ...c, synopsis: syn } : c) })))) break;
       } catch {
         // 单章失败不中断整批
       }
@@ -1316,7 +1404,7 @@ export default function Editor(props: {
   const activePos = book && activeId ? book.chapters.findIndex((c) => c.id === activeId) : -1;
 
   const saveLabel =
-    saveState === 'saving' ? '保存中…' : saveState === 'dirty' ? '未保存' : lastSaved ? '已保存 ' + lastSaved : '已保存';
+    saveError ? '保存需处理' : saveState === 'saving' ? '保存中…' : saveState === 'dirty' ? '未保存' : lastSaved ? '已保存 ' + lastSaved : '已保存';
 
   // @ 弹层坐标（相对 .paper）
   let atStyle: React.CSSProperties | undefined;
@@ -1338,10 +1426,11 @@ export default function Editor(props: {
 
   return (
     <div className={'editor-root' + (zen ? ' zen' : '')}>
+      {busy && <div className="work-lock" role="status">正在校验或处理作品文件，请稍候……</div>}
       <header className="topbar">
         <button
           className="back-btn"
-          onClick={() => void flushSave().then(props.onExit)}
+          onClick={() => void flushSave().then((ok) => { if (ok) props.onExit(); })}
         >
           ← 书架
         </button>
@@ -1463,8 +1552,18 @@ export default function Editor(props: {
         </div>
       )}
 
+      {saveError && (
+        <div className="save-error-banner" role="alert">
+          <span>{saveError}</span>
+          <button className="ghost-btn small" onClick={() => void flushSave()}>重试保存</button>
+          <button className="ghost-btn small" onClick={() => void rescueDraft()}>另存正文 TXT</button>
+          <span>可继续编辑；保存成功前留在本章。</span>
+        </div>
+      )}
+      {storageWarning && <div className="storage-warning" role="status">{storageWarning}<button className="link-btn" onClick={() => void openSnapshotPanel()}>查看备份</button></div>}
       <div className="editor-body">
         <Sidebar
+          structureRequest={structureRequest?.revision}
           book={book}
           activeId={activeId}
           onSelect={(id) => void switchChapter(id)}
@@ -1503,6 +1602,8 @@ export default function Editor(props: {
           structure={
             book ? (
               <StructureTab
+                key={restoredEpoch}
+                focusRequest={structureRequest}
                 book={book}
                 timeline={timeline}
                 foreshadows={foreshadows}
@@ -1571,8 +1672,9 @@ export default function Editor(props: {
                 </h2>
               )}
             </div>
-            <div className="doc-meta">{activeMeta ? `${lib.fmtNum(liveWords)} 字` : ''}</div>
+            <div className="doc-meta"><span role="status" className={"doc-save-state " + (saveError ? "error" : saveState)}>{saveLabel}</span>{activeMeta ? `${lib.fmtNum(liveWords)} 字` : ""}</div>
           </div>
+          <div className="document-scroll">
           <div className="paper" ref={paperRef} style={paperStyle} onContextMenu={onPaperContextMenu}>
             {editorEmpty && <div className="placeholder-hint">落笔无需完美，先写下第一句……</div>}
             <EditorContent editor={editor} />
@@ -1597,6 +1699,7 @@ export default function Editor(props: {
                 <div className="at-tip">↑↓ 选择 · 回车插入 · Esc 关闭</div>
               </div>
             )}
+          </div>
           </div>
           <div className="editor-footer">
             <span>
@@ -1655,6 +1758,8 @@ export default function Editor(props: {
           />
         ) : !chatOpen && book && activeMeta ? (
           <ChapterPanel
+            onOpenStructure={(section) => setStructureRequest((previous) => ({ section, revision: (previous?.revision ?? 0) + 1 }))}
+            onCreateCharacter={() => setEditing({ entity: ent.newCharacter('') })}
             book={book}
             activeIndex={activeMeta.index}
             chars={chars}
@@ -1675,6 +1780,8 @@ export default function Editor(props: {
         ) : null}
         {chatOpen && book && !inspector && (
           <ChatPanel
+            key={restoredEpoch}
+            onBusyChange={setChatSending}
             root={root}
             dirName={dirName}
             book={book}
@@ -1731,7 +1838,7 @@ export default function Editor(props: {
             {deleteTarget.wordCount > 0 && (
               <>
                 <br />
-                本章有 <b>{lib.fmtNum(deleteTarget.wordCount)}</b> 字，删除后不可恢复（可先做一份快照备份）。
+                本章有 <b>{lib.fmtNum(deleteTarget.wordCount)}</b> 字。删除前会自动建立完整作品快照，备份失败就停止删除。
               </>
             )}
           </p>
@@ -1749,15 +1856,16 @@ export default function Editor(props: {
       {restoreTarget && (
         <Modal title="恢复快照" onClose={() => setRestoreTarget(null)}>
           <p className="confirm-text">
-            用快照「{formatSnapName(restoreTarget)}」覆盖当前全部内容？
+            用快照「{formatSnapName(restoreTarget.name)}」恢复{restoreTarget.legacy ? '正文与目录' : '正文与全部作品资料'}？
             <br />
-            当前内容会先自动另存一份快照，不会丢失。
+            当前完整作品会先另存并校验。
+            {restoreTarget.legacy && <strong className="legacy-warning">旧版快照不含资料：人物、设定、伏笔、聊天等将保留当前版本，不随正文回退。</strong>}
           </p>
           <div className="modal-actions">
             <button className="ghost-btn" onClick={() => setRestoreTarget(null)}>
               取消
             </button>
-            <button className="primary-btn" onClick={() => void doRestore(restoreTarget)}>
+            <button className="primary-btn" onClick={() => void doRestore(restoreTarget.name)}>
               恢复
             </button>
           </div>
@@ -1767,18 +1875,19 @@ export default function Editor(props: {
       {snapPanelOpen && (
         <Modal title="备份与快照" width={520} onClose={() => setSnapPanelOpen(false)}>
           <p className="hint-text">
-            快照 = 当前「全书目录 + 全部章节」的完整拷贝，存在这本书的文件夹里。建议每写完一章备份一次。
+            新快照包含全书目录、全部章节和作品资料（含人物、伏笔、素材、聊天），恢复前会校验并留底。不含全局设置与密钥。
           </p>
           <div className="snap-list">
             {snapshots.length === 0 && <div className="snap-empty">还没有快照</div>}
-            {snapshots.map((name) => (
-              <div key={name} className="snap-item">
-                <span className="snap-name">{formatSnapName(name)}</span>
+            {snapshots.map((snapshot) => (
+              <div key={snapshot.name} className="snap-item">
+                <span className="snap-name">{formatSnapName(snapshot.name)}<small>{!snapshot.valid ? "校验失败：" + snapshot.error : snapshot.legacy ? "旧版 · 仅正文与目录" : "完整作品"}</small></span>
                 <button
                   className="ghost-btn small"
+                  disabled={!snapshot.valid || busy}
                   onClick={() => {
                     setSnapPanelOpen(false);
-                    setRestoreTarget(name);
+                    setRestoreTarget(snapshot);
                   }}
                 >
                   恢复
@@ -1922,7 +2031,7 @@ export default function Editor(props: {
           state={proposal}
           onApply={applyProposal}
           onRegenerate={() => rerunAiRef.current?.()}
-          onClose={() => setProposal(null)}
+          onClose={closeProposal}
         />
       )}
 
@@ -2102,8 +2211,12 @@ export default function Editor(props: {
 
 /** auto-20261024-153001 → （每日自动）2026-10-24 15:30:01 */
 function formatSnapName(name: string): string {
+  if (name.startsWith('before-restore-')) {
+    const date = new Date(Number(name.split('-')[2]));
+    return '恢复前留底 · ' + (Number.isNaN(date.getTime()) ? name : date.toLocaleString('zh-CN', { hour12: false }));
+  }
   const auto = name.startsWith('auto-') ? '（每日自动）' : '';
-  const m = name.replace(/^auto-/, '').match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  const m = name.replace(/^auto-/, '').match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(?:-|$)/);
   if (!m) return name;
   return auto + `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
 }
