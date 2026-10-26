@@ -790,7 +790,6 @@ input {
 .snap-name { min-width: 0; overflow-wrap: anywhere; }
 .snap-name small { display: block; color: var(--muted); margin-top: 4px; }
 .legacy-warning { display: block; margin-top: 12px; color: #a34a36; }
-.chapter-shortcuts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .chapter-panel .entity-sub { white-space: normal; overflow-wrap: anywhere; line-height: 1.65; }
 .chapter-panel .entity-sub .link-btn { display: inline-block; white-space: normal; }
 .connection-result { padding: 12px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; margin-top: 12px; font-size: 13px; }
@@ -2360,10 +2359,6 @@ body[data-theme='dark'] .modal-card .field input {
 
 /* ============ P5：专注模式 ============ */
 
-.editor-root.zen .sidebar,
-.editor-root.zen .inspector {
-  display: none;
-}
 .editor-root.zen .goal-bar {
   display: none;
 }
@@ -2388,23 +2383,20 @@ body[data-theme='dark'] .modal-card .field input {
   opacity: 1;
 }
 .zen-exit {
-  position: fixed;
-  right: 18px;
-  bottom: 14px;
-  z-index: 45;
-  border: 1px solid var(--line);
+  flex: none;
+  min-height: 34px;
+  white-space: nowrap;
+  border: 1px solid var(--accent);
   background: var(--panel);
-  color: var(--muted);
-  border-radius: 999px;
-  padding: 6px 14px;
-  font-size: 12px;
-  opacity: 0.55;
-  transition: all 0.15s;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  transition: background 0.15s;
 }
 .zen-exit:hover {
-  opacity: 1;
+  background: var(--accent-wash);
   color: var(--accent-deep);
-  border-color: var(--accent);
 }
 
 /* ============ P5：分卷 / 拖拽排序 ============ */
@@ -2989,3 +2981,90 @@ body[data-theme='dark'] .scene-mark .scene-line {
 .reader-item input {
   accent-color: var(--accent);
 }
+
+/* 全书导航 / 正文 / 本章工作台：调宽与键盘交互由 react-resizable-panels 提供。 */
+.workspace-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.workspace-panel > .sidebar {
+  width: 100%;
+  height: 100%;
+  border-right: 0;
+}
+.workspace-panel > .editor-main { height: 100%; }
+.workspace-separator {
+  position: relative;
+  width: 6px;
+  background: var(--line-soft);
+  outline: none;
+}
+.workspace-separator::after {
+  content: '';
+  position: absolute;
+  top: calc(50% - 14px);
+  left: 2px;
+  width: 2px;
+  height: 28px;
+  border-radius: 2px;
+  background: var(--muted);
+  opacity: 0.45;
+}
+.workspace-separator:hover,
+.workspace-separator:focus-visible { background: var(--accent-wash); }
+.workspace-separator:focus-visible::after { background: var(--accent-deep); opacity: 1; }
+.workspace-separator.zen-hidden { display: none; }
+.chapter-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--panel-2);
+}
+.navigation-head,
+.workbench-head {
+  flex: none;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.navigation-head > span { color: var(--ink-soft); font-size: 12px; font-weight: 600; }
+.workbench-tabs { display: flex; gap: 5px; }
+.workbench-tabs button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.workbench-tabs button[aria-selected="true"] {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+.workbench-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+.workbench-view[hidden] { display: none; }
+.chapter-workspace .workbench-view > .inspector { width: 100%; flex: 1; border-left: 0; }
+.workbench-back {
+  flex: none;
+  text-align: left;
+  padding: 9px 14px;
+  background: transparent;
+  color: var(--accent-deep);
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12px;
+}
+.cp-explain { color: var(--muted); font-size: 11.5px; line-height: 1.7; margin: 0 0 8px; }
+.cp-list-label { color: var(--ink-soft); font-size: 12px; margin: 10px 0 6px; }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { EditorState } from '@tiptap/pm/state';
+import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 import type { Editor as TipTapEditor } from '@tiptap/react';
 import type { Book, ChapterFile, ChapterMeta, Character, LoreEntry, Prop, RefIndexEntry, Volume } from '../types';
 import { MODEL_VERSION } from '../types';
@@ -106,7 +107,11 @@ export default function Editor(props: {
   const setBusy = useCallback((value: boolean) => { busyRef.current = value; setBusyState(value); }, []);
   const [restoredEpoch, setRestoredEpoch] = useState(0);
   const [chatSending, setChatSending] = useState(false);
-  const [structureRequest, setStructureRequest] = useState<{ section: 'timeline' | 'foreshadow' | 'summary'; revision: number } | null>(null);
+  const navigationPanel = usePanelRef();
+  const assistantPanel = usePanelRef();
+  const [navigationVisible, setNavigationVisible] = useState(true);
+  const [assistantVisible, setAssistantVisible] = useState(true);
+  const sidesBeforeZen = useRef<{ left: boolean; right: boolean } | null>(null);
 
   /* ---------- P5：排版 / 专注 / 素材箱 / 章纲 / 分卷 ---------- */
   const [prefs, setPrefs] = useState<lib.EditorPrefs>(lib.DEFAULT_PREFS);
@@ -154,6 +159,7 @@ export default function Editor(props: {
   const [foreshadows, setForeshadows] = useState<Foreshadow[]>([]);
   const [aiReport, setAiReport] = useState<{ phase: 'loading' | 'streaming' | 'done' | 'error'; text?: string; error?: string } | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatMounted, setChatMounted] = useState(false);
   const [synModal, setSynModal] = useState<{ meta: ChapterMeta; draft: string; busy: boolean } | null>(null);
   const [theme, setThemeState] = useState<'light' | 'dark'>(
     (document.body.dataset.theme as 'light' | 'dark') ?? 'light'
@@ -172,6 +178,31 @@ export default function Editor(props: {
   const zenRef = useRef(false);
   zenRef.current = zen;
   const typewriterRef = useRef(false);
+  useEffect(() => {
+    if (chatOpen) setChatMounted(true);
+  }, [chatOpen]);
+  useEffect(() => {
+    if (zen) {
+      sidesBeforeZen.current = {
+        left: !navigationPanel.current?.isCollapsed(),
+        right: !assistantPanel.current?.isCollapsed(),
+      };
+      navigationPanel.current?.collapse();
+      assistantPanel.current?.collapse();
+    } else if (sidesBeforeZen.current) {
+      const previous = sidesBeforeZen.current;
+      sidesBeforeZen.current = null;
+      if (previous.left) navigationPanel.current?.expand();
+      if (previous.right) assistantPanel.current?.expand();
+    }
+  }, [zen, navigationPanel, assistantPanel]);
+  useEffect(() => {
+    if (!inspector) return;
+    setChatOpen(false);
+    if (sidesBeforeZen.current) sidesBeforeZen.current.right = true;
+    setZen(false);
+    assistantPanel.current?.expand();
+  }, [inspector, assistantPanel]);
   /** 关窗钩子随时要拿到最新的 flushSave */
   const flushRef = useRef<() => Promise<boolean>>(async () => true);
   /** 编辑器事件处理器走 ref 转发，永远拿到最新闭包 */
@@ -1513,9 +1544,8 @@ export default function Editor(props: {
           <button className="ghost-btn" onClick={() => setSearchOpen(true)}>
             🔍 搜索
           </button>
-          <button className={'ghost-btn' + (chatOpen ? ' on' : '')} onClick={() => setChatOpen(!chatOpen)}>
-            AI 对话
-          </button>
+          {!navigationVisible && !zen && <button className="ghost-btn" onClick={() => navigationPanel.current?.expand()}>展开全书导航</button>}
+          {!assistantVisible && !zen && <button className="ghost-btn" onClick={() => assistantPanel.current?.expand()}>展开本章助手</button>}
           <div className="menu-anchor">
             <button
               className="ghost-btn"
@@ -1561,9 +1591,12 @@ export default function Editor(props: {
         </div>
       )}
       {storageWarning && <div className="storage-warning" role="status">{storageWarning}<button className="link-btn" onClick={() => void openSnapshotPanel()}>查看备份</button></div>}
-      <div className="editor-body">
+      <Group className="editor-body" orientation="horizontal" id="writing-workspace">
+        <Panel id="book-navigation" className="workspace-panel" style={{ overflow: 'hidden' }} panelRef={navigationPanel}
+          defaultSize={250} minSize={220} maxSize="30%" collapsible groupResizeBehavior="preserve-pixel-size"
+          onResize={(size) => setNavigationVisible(size.inPixels > 1)}>
         <Sidebar
-          structureRequest={structureRequest?.revision}
+          onCollapse={() => navigationPanel.current?.collapse()}
           book={book}
           activeId={activeId}
           onSelect={(id) => void switchChapter(id)}
@@ -1603,7 +1636,6 @@ export default function Editor(props: {
             book ? (
               <StructureTab
                 key={restoredEpoch}
-                focusRequest={structureRequest}
                 book={book}
                 timeline={timeline}
                 foreshadows={foreshadows}
@@ -1625,6 +1657,9 @@ export default function Editor(props: {
             ) : null
           }
         />
+        </Panel>
+        <Separator className={'workspace-separator' + (zen ? ' zen-hidden' : '')} aria-label="调整全书导航宽度" />
+        <Panel id="manuscript" className="workspace-panel manuscript-panel" style={{ overflow: 'hidden' }} minSize={380}>
         <main className="editor-main">
           <div className="doc-head">
             <div className="doc-pager">
@@ -1673,6 +1708,11 @@ export default function Editor(props: {
               )}
             </div>
             <div className="doc-meta"><span role="status" className={"doc-save-state " + (saveError ? "error" : saveState)}>{saveLabel}</span>{activeMeta ? `${lib.fmtNum(liveWords)} 字` : ""}</div>
+            {zen && (
+              <button className="zen-exit" title="退出专注模式（Esc）" onClick={() => setZen(false)}>
+                退出专注 · Esc
+              </button>
+            )}
           </div>
           <div className="document-scroll">
           <div className="paper" ref={paperRef} style={paperStyle} onContextMenu={onPaperContextMenu}>
@@ -1741,7 +1781,32 @@ export default function Editor(props: {
             </span>
           </div>
         </main>
-        {inspector && book ? (
+        </Panel>
+        <Separator className={'workspace-separator' + (zen ? ' zen-hidden' : '')} aria-label="调整本章助手宽度" />
+        <Panel id="chapter-workspace" className="workspace-panel" style={{ overflow: 'hidden' }} panelRef={assistantPanel}
+          defaultSize={300} minSize={280} maxSize="38%" collapsible groupResizeBehavior="preserve-pixel-size"
+          onResize={(size) => setAssistantVisible(size.inPixels > 1)}>
+        <aside className="chapter-workspace" aria-label="本章工作台">
+          <div className="workbench-head">
+            <div className="workbench-tabs" role="tablist" aria-label="本章工作台视图" onKeyDown={(event) => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+              event.preventDefault();
+              const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+              const next = tabs[chatOpen ? 0 : 1];
+              next?.focus();
+              next?.click();
+            }}>
+              <button id="chapter-tab" role="tab" aria-selected={!chatOpen} aria-controls="chapter-view"
+                onClick={() => { setChatOpen(false); setInspector(null); }}>本章</button>
+              <button id="chat-tab" role="tab" aria-selected={chatOpen} aria-controls="chat-view"
+                onClick={() => { setInspector(null); setChatOpen(true); }}>AI 对话</button>
+            </div>
+            <button className="icon-btn" title="收起本章助手" aria-label="收起本章助手" onClick={() => assistantPanel.current?.collapse()}>›</button>
+          </div>
+          <div className="workbench-view" id="chapter-view" role="tabpanel" aria-labelledby="chapter-tab" hidden={chatOpen}>
+          {inspector && book ? (
+          <>
+          <button className="workbench-back" onClick={() => setInspector(null)}>‹ 返回本章概览</button>
           <Inspector
             target={inspector}
             chars={chars}
@@ -1756,10 +1821,9 @@ export default function Editor(props: {
             onJumpChapter={(id) => void jumpToChapter(id)}
             onJumpEntity={setInspector}
           />
-        ) : !chatOpen && book && activeMeta ? (
+          </>
+        ) : book && activeMeta ? (
           <ChapterPanel
-            onOpenStructure={(section) => setStructureRequest((previous) => ({ section, revision: (previous?.revision ?? 0) + 1 }))}
-            onCreateCharacter={() => setEditing({ entity: ent.newCharacter('') })}
             book={book}
             activeIndex={activeMeta.index}
             chars={chars}
@@ -1778,7 +1842,9 @@ export default function Editor(props: {
             onJumpChapter={(id) => void jumpToChapter(id)}
           />
         ) : null}
-        {chatOpen && book && !inspector && (
+          </div>
+          <div className="workbench-view" id="chat-view" role="tabpanel" aria-labelledby="chat-tab" hidden={!chatOpen}>
+        {chatMounted && book && (
           <ChatPanel
             key={restoredEpoch}
             onBusyChange={setChatSending}
@@ -1793,14 +1859,16 @@ export default function Editor(props: {
             aiCfg={aiCfg}
             activeChapterId={activeId}
             chapterTail={editor ? editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n') : ''}
-            onClose={() => setChatOpen(false)}
             onNeedSettings={() => {
               setChatOpen(false);
               setAiSettingsOpen(true);
             }}
           />
         )}
-      </div>
+          </div>
+        </aside>
+        </Panel>
+      </Group>
 
       {/* 淡提示 → 转关联确认气泡 */}
       {hintPop && (
@@ -2033,13 +2101,6 @@ export default function Editor(props: {
           onRegenerate={() => rerunAiRef.current?.()}
           onClose={closeProposal}
         />
-      )}
-
-      {/* 专注模式退出按钮 */}
-      {zen && (
-        <button className="zen-exit" onClick={() => setZen(false)}>
-          退出专注 · Esc
-        </button>
       )}
 
       {/* P5：排版 / 素材箱 / 章纲 / 删卷 */}

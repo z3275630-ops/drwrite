@@ -56,7 +56,6 @@ export default function ChatPanel(props: {
   aiCfg: AiConfig | null;
   activeChapterId: string | null;
   chapterTail: string;
-  onClose: () => void;
   onNeedSettings: () => void;
   onBusyChange: (busy: boolean) => void;
 }) {
@@ -183,14 +182,11 @@ export default function ChatPanel(props: {
         <div className="chat-brand">
           <span className="chat-brand-mark">✦</span>
           <span className="chat-brand-name">写作顾问</span>
-          <span className={'chat-status' + (props.aiCfg ? ' on' : '')}>{props.aiCfg ? '已连接' : '未配置'}</span>
+          <span className={'chat-status' + (props.aiCfg ? ' on' : '')}>{props.aiCfg ? '已配置' : '未配置'}</span>
         </div>
         <div className="chat-header-actions">
           <button className="icon-btn" title="清空对话" onClick={() => setConfirmClear(true)}>
             🗑
-          </button>
-          <button className="icon-btn" title="关闭（对话会保留）" onClick={props.onClose}>
-            ✕
           </button>
         </div>
       </header>

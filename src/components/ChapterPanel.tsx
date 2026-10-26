@@ -5,8 +5,8 @@ import type { SceneInfo } from '../lib/scenes';
 import { sceneLabel } from '../lib/scenes';
 
 /**
- * 本章面板（P6）：右侧常驻，打开书就有内容——
- * 本章场景节拍 / 出场人物·设定·道具 / 待收伏笔 / 章纲与梗概速览。点引用仍然打开检视器。
+ * 当前章工作台：写作计划 / 场景 / 关联资料 / 待收提醒 / 写后回顾。
+ * 全书资料与结构在左侧管理；这里仅引用同一份资料，点名称打开检视器。
  */
 export default function ChapterPanel(props: {
   book: Book;
@@ -23,8 +23,6 @@ export default function ChapterPanel(props: {
   onOpenOutline: () => void;
   onOpenSynopsis: () => void;
   onJumpChapter: (chapterId: string) => void;
-  onOpenStructure: (section: 'timeline' | 'foreshadow' | 'summary') => void;
-  onCreateCharacter: () => void;
 }) {
   const meta = props.book.chapters[props.activeIndex];
   const chapterRefs = props.refs.filter((r) => r.chapterId === meta?.id);
@@ -85,12 +83,13 @@ export default function ChapterPanel(props: {
         <span className="inspector-title">本章 · 第{(meta?.index ?? 0) + 1}章</span>
       </div>
       <div className="inspector-body">
-        <nav className="chapter-shortcuts" aria-label="作品结构快捷入口">
-          <button className="ghost-btn small" onClick={() => props.onOpenStructure('foreshadow')}>伏笔</button>
-          <button className="ghost-btn small" onClick={() => props.onOpenStructure('timeline')}>时间线</button>
-          <button className="ghost-btn small" onClick={() => props.onOpenStructure('summary')}>剧情总览</button>
-        </nav>
-        <div className="sec-title first">场景节拍</div>
+        <div className="sec-title first">写作计划</div>
+        <div className="cp-explain">章纲：准备写什么</div>
+        <button className="cp-quick-row" title="编辑本章章纲" onClick={props.onOpenOutline}>
+          <span className="cp-k">纲</span>
+          <span className="cp-v">{meta?.outline ? meta.outline.split('\n')[0].slice(0, 60) : '写下这一章的目标与转折'}</span>
+        </button>
+        <div className="sec-title">场景安排</div>
         {props.scenes.length ? (
           <div className="scene-list">
             {props.scenes.map((s, i) => (
@@ -109,32 +108,33 @@ export default function ChapterPanel(props: {
           </div>
         )}
 
+        <div className="sec-title">本章关联资料</div>
         {charList.length > 0 && (
           <>
-            <div className="sec-title">出场人物 · {charList.length}</div>
+            <div className="cp-list-label">人物 · {charList.length}</div>
             <EntityChips list={charList} />
           </>
         )}
         {propList.length > 0 && (
           <>
-            <div className="sec-title">出场道具 · {propList.length}</div>
+            <div className="cp-list-label">道具 · {propList.length}</div>
             <EntityChips list={propList} />
           </>
         )}
         {loreList.length > 0 && (
           <>
-            <div className="sec-title">出场设定 · {loreList.length}</div>
+            <div className="cp-list-label">设定 · {loreList.length}</div>
             <EntityChips list={loreList} />
           </>
         )}
-        {!chapterRefs.length && <div className="entity-sub" style={{ marginTop: 6 }}>
-          先建人物卡，再点正文里的姓名虚线确认关联。
-          <button className="link-btn" onClick={props.onCreateCharacter}>建第一张人物卡</button>
+        {!charList.length && !loreList.length && !propList.length && <div className="entity-sub">
+          先在左侧建资料卡，再用正文 @ 或姓名虚线确认关联；本章用到的资料会列在这里。
         </div>}
 
         {pending.length > 0 && (
           <>
-            <div className="sec-title">待收伏笔 · {pending.length}</div>
+            <div className="sec-title">待收提醒 · {pending.length}</div>
+            <div className="cp-explain">已埋下、尚未回收的伏笔；点标题回看埋设章节。</div>
             <div className="chips">
               {pending.slice(0, 8).map((f) => (
                 <button
@@ -150,13 +150,10 @@ export default function ChapterPanel(props: {
           </>
         )}
 
-        <div className="sec-title">章纲 / 梗概</div>
+        <div className="sec-title">写后回顾</div>
+        <div className="cp-explain">梗概：已经发生了什么，供后续回看与 AI 参考。</div>
         <div className="cp-quick">
-          <button className="cp-quick-row" onClick={props.onOpenOutline}>
-            <span className="cp-k">纲</span>
-            <span className="cp-v">{meta?.outline ? meta.outline.split('\n')[0].slice(0, 40) : '未写章纲（点此起草）'}</span>
-          </button>
-          <button className="cp-quick-row" onClick={props.onOpenSynopsis}>
+          <button className="cp-quick-row" title="编辑本章梗概" onClick={props.onOpenSynopsis}>
             <span className="cp-k">概</span>
             <span className="cp-v">{meta?.synopsis ? meta.synopsis.slice(0, 60) : '未写梗概（点此补全）'}</span>
           </button>

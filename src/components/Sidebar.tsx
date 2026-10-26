@@ -8,6 +8,7 @@ import type { EntityTarget } from './types';
 type Tab = 'chapters' | 'chars' | 'lore' | 'props' | 'structure';
 
 export default function Sidebar(props: {
+  onCollapse: () => void;
   book: { chapters: ChapterMeta[]; volumes?: Volume[] } | null;
   activeId: string | null;
   onSelect: (id: string) => void;
@@ -52,6 +53,10 @@ export default function Sidebar(props: {
 
   return (
     <div className="sidebar">
+      <div className="navigation-head">
+        <span>全书导航</span>
+        <button className="icon-btn" title="收起全书导航" aria-label="收起全书导航" onClick={props.onCollapse}>‹</button>
+      </div>
       <div className="sidebar-tabs">
         <button className={tab === 'chapters' ? 'on' : ''} onClick={() => setTab('chapters')}>
           章节
