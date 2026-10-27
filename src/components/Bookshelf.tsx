@@ -18,6 +18,7 @@ function spineHue(id: string): number {
 export default function Bookshelf(props: { onOpen: (root: string, dirName: string) => void }) {
   const [root, setRoot] = useState('');
   const [books, setBooks] = useState<BookEntry[] | null>(null);
+  const [problems, setProblems] = useState<lib.BookProblem[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newGoal, setNewGoal] = useState('4000');
@@ -33,12 +34,16 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
     void (async () => {
       const r = await lib.getLibraryRoot();
       setRoot(r);
-      setBooks(await lib.listBooks(r));
+      const issues: lib.BookProblem[] = [];
+      setBooks(await lib.listBooks(r, issue => issues.push(issue)));
+      setProblems(issues);
     })();
   }, []);
 
   const refresh = async (r = root) => {
-    setBooks(await lib.listBooks(r));
+    const issues: lib.BookProblem[] = [];
+    setBooks(await lib.listBooks(r, issue => issues.push(issue)));
+    setProblems(issues);
   };
 
   const createBook = async () => {
@@ -173,6 +178,14 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
         ) : (
           <>
             <div className="shelf-grid">
+              {problems.map(problem => <div key={problem.dirName} className="book-card recovery-card">
+                <div className="book-card-body">
+                  <div className="book-card-title">{problem.dirName}</div>
+                  <div className="recovery-error">{problem.message}</div>
+                  <button className="ghost-btn small" onClick={() => void refresh()}>重试读取与恢复</button>
+                  <small>作品文件仍保留，恢复完成前不能进入编辑。</small>
+                </div>
+              </div>)}
               {books.map((e) => (
                 <div
                   key={e.dirName}
@@ -215,7 +228,7 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
                 <div className="new-label">导入旧书 TXT</div>
               </button>
             </div>
-            {books.length === 0 && (
+            {books.length === 0 && problems.length === 0 && (
               <div className="shelf-empty">
                 <div className="empty-title">从第一本书开始</div>
                 <div className="empty-sub">

@@ -12,83 +12,100 @@ fn io_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     storage::IO_LOCK.lock().map_err(|_| "文件操作未完成，请重启后重试".into())
 }
 
-/// 读一个 JSON 文件
-#[tauri::command]
-fn read_json_file(path: String) -> Result<Value, String> {
-    let _guard = io_guard()?;
-    let s = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&s).map_err(|e| e.to_string())
+// All filesystem work, including waiting for IO_LOCK, stays off the UI/runtime workers.
+async fn io_job<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = io_guard()?;
+        work()
+    }).await.map_err(|error| format!("后台文件任务未完成：{}", error))?
 }
 
-/// 写 JSON 文件（先写临时文件再替换，防止写一半崩溃毁掉原文件）
-#[tauri::command]
-fn write_json_file(path: String, value: Value) -> Result<(), String> {
-    let s = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    write_text_file(path, s + "\n")
-}
-
-/// 写纯文本文件，同样走临时文件替换
-#[tauri::command]
-fn write_text_file(path: String, content: String) -> Result<(), String> {
-    let _guard = io_guard()?;
-    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
-    storage::atomic_write(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())
-}
-
-/// 列目录：目录项带结尾 "/"，文件不带；按名称排序
-#[tauri::command]
-fn list_dir_entries(path: String) -> Result<Vec<String>, String> {
-    let _guard = io_guard()?;
-    let mut out: Vec<(bool, String)> = Vec::new();
-    for entry in fs::read_dir(&path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        out.push((is_dir, entry.file_name().to_string_lossy().to_string()));
+#[cfg(test)]
+mod io_tests {
+    #[test]
+    fn filesystem_work_uses_a_separate_thread_and_preserves_errors() {
+        let caller = std::thread::current().id();
+        let worker = tauri::async_runtime::block_on(super::io_job(|| Ok(std::thread::current().id()))).unwrap();
+        assert_ne!(caller, worker);
+        let error = tauri::async_runtime::block_on(super::io_job(|| Err::<(), _>("injected write failure".into())));
+        assert_eq!(error.unwrap_err(), "injected write failure");
     }
-    out.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(out
-        .into_iter()
-        .map(|(is_dir, name)| if is_dir { format!("{}/", name) } else { name })
-        .collect())
 }
 
 #[tauri::command]
-fn path_exists(path: String) -> bool {
-    Path::new(&path).exists()
+async fn read_json_file(path: String) -> Result<Value, String> {
+    io_job(move || {
+        let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }).await
 }
 
 #[tauri::command]
-fn create_dir(path: String) -> Result<(), String> {
-    let _guard = io_guard()?;
-    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&path).map_err(|e| e.to_string())
+async fn write_json_file(path: String, value: Value) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+        storage::atomic_write(Path::new(&path), (text + "\n").as_bytes()).map_err(|e| e.to_string())
+    }).await
 }
 
 #[tauri::command]
-fn delete_file(path: String) -> Result<(), String> {
-    let _guard = io_guard()?;
-    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
-    fs::remove_file(&path).map_err(|e| e.to_string())
+async fn write_text_file(path: String, content: String) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        storage::atomic_write(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())
+    }).await
 }
 
-/// 删除整个目录（删除作品 / 清理旧快照用），调用前前端必须弹确认
 #[tauri::command]
-fn delete_dir(path: String) -> Result<(), String> {
-    let _guard = io_guard()?;
-    storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
-    fs::remove_dir_all(&path).map_err(|e| e.to_string())
+async fn list_dir_entries(path: String) -> Result<Vec<String>, String> {
+    io_job(move || {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            out.push(if entry.file_type().map_err(|e| e.to_string())?.is_dir() { format!("{}/", name) } else { name });
+        }
+        out.sort();
+        Ok(out)
+    }).await
 }
 
-/// 递归复制目录（做快照 / 恢复快照用）
 #[tauri::command]
-fn copy_tree(src: String, dst: String) -> Result<(), String> {
-    let _guard = io_guard()?;
-    storage::ensure_no_pending_restore(Path::new(&dst)).map_err(|e| e.to_string())?;
-    let src_path = Path::new(&src);
-    if !src_path.is_dir() {
-        return Err(format!("源目录不存在: {}", src));
-    }
-    copy_dir_inner(src_path, Path::new(&dst)).map_err(|e| e.to_string())
+async fn path_exists(path: String) -> Result<bool, String> { io_job(move || Ok(Path::new(&path).exists())).await }
+
+#[tauri::command]
+async fn create_dir(path: String) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        fs::create_dir_all(path).map_err(|e| e.to_string())
+    }).await
+}
+
+#[tauri::command]
+async fn delete_file(path: String) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        fs::remove_file(path).map_err(|e| e.to_string())
+    }).await
+}
+
+#[tauri::command]
+async fn delete_dir(path: String) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        fs::remove_dir_all(path).map_err(|e| e.to_string())
+    }).await
+}
+
+#[tauri::command]
+async fn copy_tree(src: String, dst: String) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&dst)).map_err(|e| e.to_string())?;
+        let source = Path::new(&src);
+        if !source.is_dir() { return Err(format!("源目录不存在: {}", src)); }
+        copy_dir_inner(source, Path::new(&dst)).map_err(|e| e.to_string())
+    }).await
 }
 
 fn copy_dir_inner(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -107,27 +124,23 @@ fn copy_dir_inner(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 #[tauri::command]
-fn create_book_snapshot(book_dir: String, name_base: String) -> Result<String, String> {
-    let _guard = io_guard()?;
-    storage::create_snapshot(Path::new(&book_dir), &name_base).map_err(|e| e.to_string())
+async fn create_book_snapshot(book_dir: String, name_base: String) -> Result<String, String> {
+    io_job(move || storage::create_snapshot(Path::new(&book_dir), &name_base).map_err(|e| e.to_string())).await
 }
 
 #[tauri::command]
-fn list_book_snapshots(book_dir: String) -> Result<Vec<storage::SnapshotInfo>, String> {
-    let _guard = io_guard()?;
-    storage::list_snapshots(Path::new(&book_dir)).map_err(|e| e.to_string())
+async fn list_book_snapshots(book_dir: String) -> Result<Vec<storage::SnapshotInfo>, String> {
+    io_job(move || storage::list_snapshots(Path::new(&book_dir)).map_err(|e| e.to_string())).await
 }
 
 #[tauri::command]
-fn restore_book_snapshot(book_dir: String, name: String) -> Result<bool, String> {
-    let _guard = io_guard()?;
-    storage::restore_snapshot(Path::new(&book_dir), &name).map_err(|e| e.to_string())
+async fn restore_book_snapshot(book_dir: String, name: String) -> Result<bool, String> {
+    io_job(move || storage::restore_snapshot(Path::new(&book_dir), &name).map_err(|e| e.to_string())).await
 }
 
 #[tauri::command]
-fn recover_book_restore(book_dir: String) -> Result<bool, String> {
-    let _guard = io_guard()?;
-    storage::recover_restore(Path::new(&book_dir)).map_err(|e| e.to_string())
+async fn recover_book_restore(book_dir: String) -> Result<bool, String> {
+    io_job(move || storage::recover_restore(Path::new(&book_dir)).map_err(|e| e.to_string())).await
 }
 
 /// 默认书库位置：文档\Drwrite 书库
@@ -273,7 +286,7 @@ async fn ai_chat_stream(
             if let Some(d) = choice["delta"]["content"].as_str() {
                 if !d.is_empty() {
                     content.push_str(d);
-                    let _ = on_event.send(serde_json::json!({ "t": "c", "v": content }).to_string());
+                    let _ = on_event.send(serde_json::json!({ "t": "d", "v": d }).to_string());
                 }
             }
             if let Some(r) = choice["delta"]["reasoning_content"].as_str() {

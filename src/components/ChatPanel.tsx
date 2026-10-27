@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, Prop, RefIndexEntry } from '../types';
 import { chatAi } from '../lib/ai';
 import type { AiConfig, AiMessage } from '../lib/ai';
@@ -7,6 +7,8 @@ import * as st from '../lib/structure';
 import { loadChat, saveChat } from '../lib/chat';
 import type { ChatMsg } from '../lib/chat';
 import { toast } from './Toast';
+import { SaveCoordinator } from '../lib/saveCoordinator';
+import { safeName, saveExportFile } from '../lib/library';
 
 type CtxKey = 'body' | 'cards' | 'fores' | 'summary';
 
@@ -55,15 +57,25 @@ export default function ChatPanel(props: {
   refs: RefIndexEntry[];
   aiCfg: AiConfig | null;
   activeChapterId: string | null;
-  chapterTail: string;
+  getChapterTail: () => string;
   onNeedSettings: () => void;
   onBusyChange: (busy: boolean) => void;
+  onRegisterFlush: (flush: () => Promise<boolean>) => void;
 }) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [streamText, setStreamText] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [loadError, setLoadError] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [requestError, setRequestError] = useState('');
+  const [leaveNotice, setLeaveNotice] = useState('');
+  const messageRef = useRef<ChatMsg[]>([]);
+  const streamRef = useRef('');
+  const sendingRef = useRef(false);
+  const saver = useRef(new SaveCoordinator()).current;
   const [ctx, setCtx] = useState<Record<CtxKey, boolean>>({
     body: true,
     cards: true,
@@ -73,16 +85,40 @@ export default function ChatPanel(props: {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadedRef = useRef(false);
+  const updateMessages = useCallback((next: ChatMsg[]) => {
+    messageRef.current = next;
+    saver.markDirty();
+    setMsgs(next);
+  }, [saver]);
+  const persist = useCallback(async () => {
+    if (!loadedRef.current) return true;
+    const ok = await saver.flush(() => saveChat(props.root, props.dirName, messageRef.current));
+    setSaveError(ok ? '' : '对话未保存，内容仍在本书界面。' + String(saver.error));
+    return ok;
+  }, [props.root, props.dirName, saver]);
+  const flushBeforeLeave = useCallback(async () => {
+    if (sendingRef.current) { setLeaveNotice('顾问仍在生成，已取消离开；请等回复完成。正文可以继续写。'); return false; }
+    return persist();
+  }, [persist]);
+  useEffect(() => {
+    props.onRegisterFlush(flushBeforeLeave);
+    return () => props.onRegisterFlush(async () => true);
+  }, [props.onRegisterFlush, flushBeforeLeave]);
   useEffect(() => {
     props.onBusyChange(sending);
     return () => props.onBusyChange(false);
   }, [sending, props.onBusyChange]);
 
   useEffect(() => {
+    let alive = true;
     void loadChat(props.root, props.dirName).then((m) => {
+      if (!alive) return;
+      messageRef.current = m;
       setMsgs(m);
       loadedRef.current = true;
-    });
+      setLoaded(true);
+    }).catch(error => { if (alive) setLoadError(String(error)); });
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.root, props.dirName]);
 
@@ -91,6 +127,7 @@ export default function ChatPanel(props: {
   }, [msgs, sending, streamText]);
 
   const buildContext = (): AiMessage => {
+    const chapterTail = props.getChapterTail();
     const meta = props.book.chapters.find((c) => c.id === props.activeChapterId);
     const relatedIds = [
       ...new Set(props.refs.filter((r) => r.chapterId === props.activeChapterId).map((r) => r.targetId)),
@@ -116,7 +153,7 @@ export default function ChatPanel(props: {
       meta
         ? `当前在第${meta.index + 1}章「${meta.title}」${meta.synopsis ? '，梗概：' + meta.synopsis : ''}`
         : '',
-      ctx.body && props.chapterTail ? '当前章正文结尾：\n…' + props.chapterTail.slice(-800) : '',
+      ctx.body && chapterTail ? '当前章正文结尾：\n…' + chapterTail.slice(-800) : '',
     ].filter(Boolean);
     return {
       role: 'system',
@@ -134,16 +171,21 @@ export default function ChatPanel(props: {
 
   const send = async (override?: string) => {
     const text = (override ?? input).trim();
-    if (!text || sending) return;
+    if (!text || sendingRef.current || !loadedRef.current) return;
     if (!props.aiCfg) {
       props.onNeedSettings();
       return;
     }
     const userMsg: ChatMsg = { role: 'user', content: text, at: new Date().toISOString() };
-    const next = [...msgs, userMsg];
-    setMsgs(next);
+    const next = [...messageRef.current, userMsg];
+    updateMessages(next);
+    void persist();
     setInput('');
+    sendingRef.current = true;
     setSending(true);
+    setRequestError('');
+    setLeaveNotice('');
+    streamRef.current = '';
     setStreamText('');
     try {
       const history: AiMessage[] = next.slice(-12).map((m) => ({ role: m.role, content: m.content }));
@@ -151,17 +193,21 @@ export default function ChatPanel(props: {
         props.aiCfg,
         [buildContext(), ...history],
         { maxTokens: 1400, temperature: 0.7 },
-        { onContent: (full) => setStreamText(full) }
+        { onContent: (full) => { streamRef.current = full; setStreamText(full); } }
       );
       const done = [...next, { role: 'assistant' as const, content: r.text, at: new Date().toISOString() }];
-      setMsgs(done);
-      await saveChat(props.root, props.dirName, done);
+      updateMessages(done);
     } catch (e) {
-      setMsgs(next); // 保留用户消息，可重发
-      toast(String(e instanceof Error ? e.message : e), 'err');
+      if (streamRef.current) updateMessages([...next, { role: 'assistant', content: streamRef.current,
+        at: new Date().toISOString(), incomplete: true }]);
+      setRequestError('请求未完成：' + String(e instanceof Error ? e.message : e));
     } finally {
+      sendingRef.current = false;
       setSending(false);
+      setLeaveNotice('');
+      streamRef.current = '';
       setStreamText('');
+      await persist();
     }
   };
 
@@ -185,11 +231,25 @@ export default function ChatPanel(props: {
           <span className={'chat-status' + (props.aiCfg ? ' on' : '')}>{props.aiCfg ? '已配置' : '未配置'}</span>
         </div>
         <div className="chat-header-actions">
-          <button className="icon-btn" title="清空对话" onClick={() => setConfirmClear(true)}>
+          <button className="icon-btn" title="清空对话" disabled={sending || !loaded} onClick={() => setConfirmClear(true)}>
             🗑
           </button>
         </div>
       </header>
+
+      {(loadError || saveError || leaveNotice || requestError) && <div className="chat-persistence-error" role="alert">
+        {loadError || saveError || leaveNotice || requestError}
+        {saveError && <>
+          <button className="link-btn" onClick={() => void persist()}>重试保存</button>
+          <button className="link-btn" onClick={() => void saveExportFile(safeName(props.book.title) + '-对话救援.txt',
+            messageRef.current.map(m => `${m.role === 'user' ? '我' : 'AI'}${m.incomplete ? '（未完成）' : ''}：\n${m.content}`).join('\n\n')
+              + (streamRef.current ? '\n\n正在生成的片段：\n' + streamRef.current : ''), props.root).catch(error => toast(String(error), 'err'))}>另存对话 TXT</button>
+        </>}
+        {requestError && !saveError && <button className="link-btn" disabled={sending} onClick={() => {
+          const last = [...messageRef.current].reverse().find(m => m.role === 'user');
+          if (last) void send(last.content);
+        }}>重新请求</button>}
+      </div>}
 
       <div className="chat-context-bar" role="group" aria-label="本次对话带上的上下文">
         <span className="chat-context-label">带上</span>
@@ -240,7 +300,7 @@ export default function ChatPanel(props: {
           <div key={i} className={'chat-msg ' + m.role}>
             {m.role === 'assistant' && <span className="chat-avatar">✦</span>}
             <div className="chat-bubble-wrap">
-              <div className="chat-bubble">{m.content}</div>
+              <div className="chat-bubble">{m.incomplete && <small className="chat-incomplete">回复中断，以下为已保留的片段</small>}{m.content}</div>
               {m.role === 'assistant' && (
                 <button className="chat-copy" onClick={() => void copy(m.content)}>
                   复制
@@ -281,6 +341,7 @@ export default function ChatPanel(props: {
             ref={inputRef}
             rows={2}
             value={input}
+            disabled={!loaded}
             placeholder="问情节、人物、伏笔……"
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -295,7 +356,7 @@ export default function ChatPanel(props: {
             className="chat-send"
             title="发送（Enter）"
             aria-label="发送"
-            disabled={!input.trim() || sending}
+            disabled={!input.trim() || sending || !loaded}
             onClick={() => void send()}
           >
             ↑
@@ -322,8 +383,8 @@ export default function ChatPanel(props: {
                 <button
                   className="danger-btn"
                   onClick={() => {
-                    setMsgs([]);
-                    void saveChat(props.root, props.dirName, []);
+                    updateMessages([]);
+                    void persist();
                     setConfirmClear(false);
                   }}
                 >

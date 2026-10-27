@@ -5,6 +5,7 @@
  */
 import type { JsonValue } from './json';
 import { isDesktop, readJsonOrNull, appSettingsPath, updateSettings } from './fs';
+import { StreamBatch } from './streamBatch';
 
 export interface AiConfig {
   baseUrl: string;
@@ -186,6 +187,7 @@ export async function chatAi(
   ev?: StreamHandlers
 ): Promise<AiResult> {
   let sawAnything = false;
+  const batch = new StreamBatch(ev ?? {});
   try {
     return await streamAi(
       cfg,
@@ -194,11 +196,11 @@ export async function chatAi(
       {
         onContent: (full) => {
           sawAnything = true;
-          ev?.onContent?.(full);
+          batch.pushContent(full);
         },
         onReasoning: (n) => {
           sawAnything = true;
-          ev?.onReasoning?.(n);
+          batch.pushReasoning(n);
         },
       }
     );
@@ -206,6 +208,8 @@ export async function chatAi(
     // 已经往界面推过内容就不能静默重来，直接报错
     if (sawAnything) throw e;
     return callAi(cfg, messages, opts);
+  } finally {
+    batch.flush();
   }
 }
 
@@ -249,8 +253,8 @@ async function streamAi(
     ch.onmessage = (raw: string) => {
       try {
         const e = JSON.parse(raw) as { t?: string; v?: string; n?: number };
-        if (e.t === 'c' && typeof e.v === 'string') {
-          content = e.v;
+        if ((e.t === 'd' || e.t === 'c') && typeof e.v === 'string') {
+          content = e.t === 'd' ? content + e.v : e.v;
           ev?.onContent?.(content);
         } else if (e.t === 'r' && typeof e.n === 'number') {
           reasoningChars = e.n;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { EditorState } from '@tiptap/pm/state';
@@ -52,6 +52,9 @@ import * as st from '../lib/structure';
 import { entityCardLines } from '../lib/assembler';
 import { writeText, joinPath, isDesktop } from '../lib/fs';
 import { SaveCoordinator, SerialQueue } from '../lib/saveCoordinator';
+import { profileCount, profileStart, profileEnd } from '../lib/performanceProbe';
+import { BackupCoordinator } from '../lib/backupCoordinator';
+import { LiveWordCount, EmptyEditorHint, UndoRedoControls } from './LiveEditorState';
 
 const p2 = (n: number) => String(n).padStart(2, '0');
 
@@ -83,6 +86,7 @@ export default function Editor(props: {
   onExit: () => void;
 }) {
   const { root, dirName } = props;
+  profileCount('editor-render');
   const bookRef = useRef<Book | null>(null);
   const [book, setBookState] = useState<Book | null>(null);
   const setBook = useCallback((value: Book | null) => { bookRef.current = value; setBookState(value); }, []);
@@ -92,9 +96,8 @@ export default function Editor(props: {
   const [saveState, setSaveState] = useState<'saved' | 'dirty' | 'saving' | 'error'>('saved');
   const [saveError, setSaveError] = useState('');
   const [storageWarning, setStorageWarning] = useState('');
+  const [backupWarning, setBackupWarning] = useState('');
   const [lastSaved, setLastSaved] = useState('');
-  const [liveWords, setLiveWords] = useState(0);
-  const [editorEmpty, setEditorEmpty] = useState(true);
   const [renamingBook, setRenamingBook] = useState(false);
   const [bookTitleDraft, setBookTitleDraft] = useState('');
   const [menu, setMenu] = useState<'export' | null>(null);
@@ -124,7 +127,6 @@ export default function Editor(props: {
   const [scenes, setScenes] = useState<SceneInfo[]>([]);
   const [sceneEdit, setSceneEdit] = useState<{ pos: number; title: string } | null>(null);
   const [titleEdit, setTitleEdit] = useState<{ id: string; draft: string } | null>(null);
-  const [, bumpHistory] = useReducer((x: number) => x + 1, 0);
 
   // 切章时放弃正在编辑的标题，避免把旧草稿写到新章
   useEffect(() => {
@@ -168,6 +170,9 @@ export default function Editor(props: {
   const saver = useRef(new SaveCoordinator()).current;
   const navigatingRef = useRef(false);
   const diskQueue = useRef(new SerialQueue()).current;
+  const backupGate = useRef(new BackupCoordinator()).current;
+  const chatFlushRef = useRef<() => Promise<boolean>>(async () => true);
+  const chatFlushFailedRef = useRef(false);
   const pendingBookEdit = useRef<((current: Book) => Book) | null>(null);
   const timerRef = useRef<number | undefined>(undefined);
   const switchingRef = useRef(false);
@@ -213,6 +218,7 @@ export default function Editor(props: {
   }>({});
 
   const editor = useEditor({
+    shouldRerenderOnTransaction: false,
     extensions: [
       StarterKit,
       EntityRefMark,
@@ -273,10 +279,38 @@ export default function Editor(props: {
     }
   }, [root, dirName]);
 
-  const flushSave = useCallback(async (): Promise<boolean> => {
+  const registerChatFlush = useCallback((flush: () => Promise<boolean>) => { chatFlushRef.current = flush; }, []);
+  const finishChatSave = useCallback(async () => {
+    const ok = await chatFlushRef.current();
+    chatFlushFailedRef.current = !ok;
+    if (!ok) {
+      if (sidesBeforeZen.current) sidesBeforeZen.current.right = true;
+      setZen(false);
+      setChatOpen(true);
+      assistantPanel.current?.expand();
+    }
+    return ok;
+  }, [assistantPanel]);
+  const performBackup = useCallback((auto: boolean) => diskQueue.run(async () => {
+    const name = await lib.createSnapshot(root, dirName, auto);
+    const current = bookRef.current;
+    if (current) {
+      const next = { ...current, lastAutoSnapshot: lib.todayStr() };
+      await lib.saveBook(root, dirName, next);
+      setBook(next);
+    }
+    setBackupWarning('');
+    return name;
+  }, true), [root, dirName, diskQueue, setBook]);
+  const backupFailed = useCallback((error: unknown) => {
+    setBackupWarning('正文已保存，但备份未成功。稍后会限频重试，也可立即重试：' + String(error));
+  }, []);
+  useEffect(() => () => backupGate.cancelScheduled(), [backupGate]);
+
+  const flushSave = useCallback(async (includeChat = true): Promise<boolean> => {
     window.clearTimeout(timerRef.current);
-    await diskQueue.idle();
-    if (!saver.dirty && !saver.saving && !pendingBookEdit.current) return true;
+    if (saver.dirty || saver.saving || pendingBookEdit.current || diskQueue.hasPendingWrites) await diskQueue.idle();
+    if (!saver.dirty && !saver.saving && !pendingBookEdit.current) return includeChat ? finishChatSave() : true;
     setSaveState('saving');
     let success = await saver.flush(() => diskQueue.run(async () => {
       const current = bookRef.current;
@@ -310,13 +344,15 @@ export default function Editor(props: {
       void refreshRefs();
       const d = new Date();
       setLastSaved(`${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`);
+      if (isDesktop && bookRef.current) backupGate.schedule(lib.todayStr(), bookRef.current.lastAutoSnapshot,
+        async () => { await performBackup(true); }, backupFailed);
     } else {
       const detail = String(saver.error instanceof Error ? saver.error.message : saver.error);
       setSaveError('保存失败，稿件仍留在当前章。' + detail);
       setSaveState('error');
     }
-    return success;
-  }, [editor, root, dirName, refreshRefs, saver, setBook, diskQueue]);
+    return success && (!includeChat || await finishChatSave());
+  }, [editor, root, dirName, refreshRefs, saver, setBook, diskQueue, finishChatSave, backupGate, performBackup, backupFailed]);
   flushRef.current = flushSave;
 
   /**
@@ -335,8 +371,6 @@ export default function Editor(props: {
       } finally {
         switchingRef.current = false;
       }
-      setLiveWords(words);
-      setEditorEmpty(editor.isEmpty);
       setSaveState('saved');
       saver.reset();
       setSaveError('');
@@ -477,20 +511,20 @@ export default function Editor(props: {
 
   handlersRef.current.onUpdate = (ed: TipTapEditor) => {
     if (switchingRef.current) return;
+    const measuring = profileStart();
     saver.markDirty();
     setSaveState('dirty');
-    setLiveWords(countWords(ed.getText()));
-    setEditorEmpty(ed.isEmpty);
     // 场景列表跟着正文走（很便宜的一次遍历）
     const sc: SceneInfo[] = [];
     ed.state.doc.content.forEach((node, _off, i) => {
       if (node.type.name === 'sceneMark') sc.push({ blockIndex: i, title: (node.attrs.title as string) ?? '' });
     });
-    setScenes(sc);
-    bumpHistory();
+    setScenes(previous => previous.length === sc.length && previous.every((scene, index) =>
+      scene.blockIndex === sc[index].blockIndex && scene.title === sc[index].title) ? previous : sc);
     window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => void flushSave(), 800);
+    timerRef.current = window.setTimeout(() => void flushSave(false), 800);
     updateAtPopup(ed);
+    profileEnd('update-handler-ms', measuring);
   };
 
   handlersRef.current.onKey = (e: KeyboardEvent) => {
@@ -665,14 +699,8 @@ export default function Editor(props: {
       ...propEnts.map((p) => ({ kind: 'prop' as const, id: p.id, name: p.name, aliases: p.aliases })),
     ];
     if (editor) editor.view.dispatch(editor.state.tr.setMeta('drwriteHintRefresh', true));
-    if (editor) {
-      const known = new Set([...chars.map((c) => c.id), ...lore.map((l) => l.id), ...propEnts.map((p) => p.id)]);
-      editor.view.dom.querySelectorAll<HTMLElement>('[data-entity-id]').forEach((el) => {
-        el.classList.toggle('dangling', !known.has(el.getAttribute('data-entity-id') ?? ''));
-      });
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chars, lore, propEnts, editor, activeId, liveWords]);
+  }, [chars, lore, propEnts, editor, activeId]);
 
   /* ---------- 全局保存钩子 ---------- */
 
@@ -713,10 +741,11 @@ export default function Editor(props: {
           if (!saved) {
             closing = false;
             editorInstanceRef.current?.setEditable(activeIdRef.current != null, false);
-            setSaveError((previous) => previous || '保存尚未完成，已取消关闭。请重试保存或另存正文。');
+            if (!chatFlushFailedRef.current) setSaveError((previous) => previous || '保存尚未完成，已取消关闭。请重试保存或另存正文。');
             return;
           }
           try {
+            backupGate.cancelScheduled();
             await win.destroy();
           } catch {
             // destroy 需要 core:window:allow-destroy（已加）；万一权限再出问题，走进程退出兜底
@@ -754,7 +783,7 @@ export default function Editor(props: {
       }
     };
     const onHide = () => {
-      if (document.visibilityState === 'hidden') void flushSave();
+      if (document.visibilityState === 'hidden') void flushSave(false);
     };
     window.addEventListener('keydown', onKey);
     document.addEventListener('visibilitychange', onHide);
@@ -1033,10 +1062,11 @@ export default function Editor(props: {
     setBusy(true);
     try {
       if (!(await flushSave())) return;
-      const name = await lib.createSnapshot(root, dirName);
+      let name = '';
+      const ok = await backupGate.attempt(lib.todayStr(), async () => { name = await performBackup(false); }, backupFailed);
+      if (!ok) return;
       setSnapshots(await lib.listSnapshots(root, dirName));
-      setStorageWarning('');
-      toast('已备份正文与资料（' + name + '）');
+      toast(name ? '已备份正文与资料（' + name + '）' : '备份已完成');
     } catch (e) {
       toast('备份失败：' + String(e), 'err');
     } finally {
@@ -1051,7 +1081,11 @@ export default function Editor(props: {
     setBusy(true);
     try {
       if (!(await flushSave())) return;
+      backupGate.cancelScheduled();
+      await diskQueue.idle();
       await lib.restoreSnapshot(root, dirName, name);
+      backupGate.resetAfterRestore();
+      setBackupWarning('');
       setChatOpen(false);
       setNotesOpen(false);
       setInspector(null);
@@ -1461,7 +1495,13 @@ export default function Editor(props: {
       <header className="topbar">
         <button
           className="back-btn"
-          onClick={() => void flushSave().then((ok) => { if (ok) props.onExit(); })}
+          onClick={() => void (async () => {
+            if (!(await flushSave())) return;
+            backupGate.cancelScheduled();
+            setBusy(true);
+            await diskQueue.idle();
+            props.onExit();
+          })()}
         >
           ← 书架
         </button>
@@ -1507,24 +1547,7 @@ export default function Editor(props: {
           </span>
         </div>
         <div className="topbar-actions">
-          <div className="undo-group">
-            <button
-              className="ghost-btn icon-only"
-              title="撤销（Ctrl+Z）"
-              disabled={!editor || !editor.can().undo()}
-              onClick={() => editor?.chain().focus().undo().run()}
-            >
-              ↶
-            </button>
-            <button
-              className="ghost-btn icon-only"
-              title="重做（Ctrl+Y）"
-              disabled={!editor || !editor.can().redo()}
-              onClick={() => editor?.chain().focus().redo().run()}
-            >
-              ↷
-            </button>
-          </div>
+          <UndoRedoControls key={`${activeId}:${restoredEpoch}`} editor={editor} />
           <button className="ghost-btn icon-only" title="排版与手感（字号 / 行距 / 字体 / 打字机滚动）" onClick={() => setFontOpen(true)}>
             Aa
           </button>
@@ -1591,6 +1614,7 @@ export default function Editor(props: {
         </div>
       )}
       {storageWarning && <div className="storage-warning" role="status">{storageWarning}<button className="link-btn" onClick={() => void openSnapshotPanel()}>查看备份</button></div>}
+      {backupWarning && <div className="storage-warning" role="status">{backupWarning}<button className="link-btn" onClick={() => void doSnapshot()}>重试备份</button></div>}
       <Group className="editor-body" orientation="horizontal" id="writing-workspace">
         <Panel id="book-navigation" className="workspace-panel" style={{ overflow: 'hidden' }} panelRef={navigationPanel}
           defaultSize={250} minSize={220} maxSize="30%" collapsible groupResizeBehavior="preserve-pixel-size"
@@ -1707,7 +1731,7 @@ export default function Editor(props: {
                 </h2>
               )}
             </div>
-            <div className="doc-meta"><span role="status" className={"doc-save-state " + (saveError ? "error" : saveState)}>{saveLabel}</span>{activeMeta ? `${lib.fmtNum(liveWords)} 字` : ""}</div>
+            <div className="doc-meta"><span role="status" className={"doc-save-state " + (saveError ? "error" : saveState)}>{saveLabel}</span>{activeMeta && <LiveWordCount key={`${activeId}:${restoredEpoch}`} editor={editor} />}</div>
             {zen && (
               <button className="zen-exit" title="退出专注模式（Esc）" onClick={() => setZen(false)}>
                 退出专注 · Esc
@@ -1716,7 +1740,7 @@ export default function Editor(props: {
           </div>
           <div className="document-scroll">
           <div className="paper" ref={paperRef} style={paperStyle} onContextMenu={onPaperContextMenu}>
-            {editorEmpty && <div className="placeholder-hint">落笔无需完美，先写下第一句……</div>}
+            <EmptyEditorHint key={`${activeId}:${restoredEpoch}`} editor={editor} />
             <EditorContent editor={editor} />
             {atPopup && (
               <div className="at-popup" style={atStyle}>
@@ -1743,10 +1767,7 @@ export default function Editor(props: {
           </div>
           <div className="editor-footer">
             <span>
-              本章 {lib.fmtNum(liveWords)} 字
-              {activeMeta && liveWords !== activeMeta.wordCount
-                ? '（已存 ' + lib.fmtNum(activeMeta.wordCount) + '）'
-                : ''}
+              <LiveWordCount key={`${activeId}:${restoredEpoch}`} editor={editor} saved={activeMeta?.wordCount} footer />
               <span className="footer-hint">选中文字右键唤起 AI · 输入 @ 引用 · 点虚线转关联</span>
             </span>
             <span className="footer-actions">
@@ -1847,6 +1868,7 @@ export default function Editor(props: {
         {chatMounted && book && (
           <ChatPanel
             key={restoredEpoch}
+            onRegisterFlush={registerChatFlush}
             onBusyChange={setChatSending}
             root={root}
             dirName={dirName}
@@ -1858,7 +1880,10 @@ export default function Editor(props: {
             refs={refs}
             aiCfg={aiCfg}
             activeChapterId={activeId}
-            chapterTail={editor ? editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n') : ''}
+            getChapterTail={() => {
+              const doc = editorInstanceRef.current?.state.doc;
+              return doc ? doc.textBetween(Math.max(0, doc.content.size - 2000), doc.content.size, '\n') : '';
+            }}
             onNeedSettings={() => {
               setChatOpen(false);
               setAiSettingsOpen(true);

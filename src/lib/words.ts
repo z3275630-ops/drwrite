@@ -3,8 +3,10 @@
  * 计数口径：CJK 字符逐字计；连续的英文/数字串计 1；空白不计；标点计入（与网文平台口径接近）。
  */
 import type { JsonValue } from './json';
+import { profileStart, profileEnd } from './performanceProbe';
 
 export function countWords(text: string): number {
+  const measuring = profileStart();
   let cjk = 0;
   let latinRun = 0;
   let inLatinRun = false;
@@ -36,6 +38,7 @@ export function countWords(text: string): number {
       inLatinRun = false;
     }
   }
+  profileEnd('word-count-ms', measuring);
   return cjk + latinRun;
 }
 

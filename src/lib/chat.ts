@@ -3,12 +3,13 @@
  * 文件：entities/chat.json，只存 user/assistant 轮次；上下文每次发送时重建。
  */
 import type { JsonValue } from './json';
-import { readJsonOrNull, writeJson, joinPath } from './fs';
+import { readJson, writeJson, joinPath, exists } from './fs';
 
 export interface ChatMsg {
   role: 'user' | 'assistant';
   content: string;
   at: string;
+  incomplete?: boolean;
 }
 
 const MAX_STORED = 200;
@@ -18,8 +19,13 @@ function chatPath(root: string, dirName: string): string {
 }
 
 export async function loadChat(root: string, dirName: string): Promise<ChatMsg[]> {
-  const v = await readJsonOrNull(chatPath(root, dirName));
-  return Array.isArray(v) ? (v as unknown as ChatMsg[]) : [];
+  const path = chatPath(root, dirName);
+  if (!(await exists(path))) return [];
+  const v = await readJson(path);
+  if (!Array.isArray(v) || v.some(item => !item || typeof item !== 'object'
+    || !['user', 'assistant'].includes(String((item as Record<string, JsonValue>).role))
+    || typeof (item as Record<string, JsonValue>).content !== 'string')) throw Error('对话文件损坏，已停止写入以保留原记录');
+  return v as unknown as ChatMsg[];
 }
 
 export async function saveChat(root: string, dirName: string, msgs: ChatMsg[]): Promise<void> {

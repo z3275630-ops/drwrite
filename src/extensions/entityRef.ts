@@ -8,6 +8,7 @@ import { Mark, Extension } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { EditorState, Transaction } from '@tiptap/pm/state';
+import { profileStart, profileEnd } from '../lib/performanceProbe';
 
 export const entityRefMarkName = 'entityRef';
 
@@ -94,8 +95,10 @@ const hintKey = new PluginKey<DecorationSet>('drwriteEntityHint');
 
 /** 收集一段文本里命中的名字区间（长名优先，跳过重叠） */
 function buildHints(state: EditorState, entities: HintEntity[]): DecorationSet {
+  const measuring = profileStart();
   const decos: Decoration[] = [];
   const claimed: [number, number][] = [];
+  const known = new Set(entities.map(entity => entity.id));
   const names = entities
     .flatMap((e) => [{ ...e, hit: e.name }, ...e.aliases.map((a) => ({ ...e, hit: a }))])
     .filter((x) => x.hit && x.hit.length >= 2) // 单字名误报太多，不提示
@@ -103,7 +106,11 @@ function buildHints(state: EditorState, entities: HintEntity[]): DecorationSet {
 
   state.doc.descendants((node, pos) => {
     if (!node.isText || !node.text) return;
-    if (node.marks.some((m) => m.type.name === entityRefMarkName)) return;
+    const reference = node.marks.find(mark => mark.type.name === entityRefMarkName);
+    if (reference) {
+      if (!known.has(reference.attrs.targetId)) decos.push(Decoration.inline(pos, pos + node.nodeSize, { class: 'dangling' }));
+      return;
+    }
     const text = node.text;
     for (const n of names) {
       let idx = text.indexOf(n.hit);
@@ -131,7 +138,9 @@ function buildHints(state: EditorState, entities: HintEntity[]): DecorationSet {
       }
     }
   });
-  return DecorationSet.create(state.doc, decos);
+  const decorations = DecorationSet.create(state.doc, decos);
+  profileEnd('hint-build-ms', measuring);
+  return decorations;
 }
 
 export const EntityHintExtension = Extension.create<HintOptions>({

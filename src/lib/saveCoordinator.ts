@@ -37,10 +37,13 @@ export class SaveCoordinator {
 /** Metadata and body writes share an ordered queue; a failure does not poison later retries. */
 export class SerialQueue {
   private tail: Promise<unknown> = Promise.resolve();
+  private foreground = 0;
+  get hasPendingWrites(): boolean { return this.foreground > 0; }
   idle(): Promise<unknown> { return this.tail; }
-  run<T>(work: () => Promise<T>): Promise<T> {
+  run<T>(work: () => Promise<T>, background = false): Promise<T> {
+    if (!background) this.foreground++;
     const operation = this.tail.then(work);
-    this.tail = operation.catch(() => undefined);
+    this.tail = operation.catch(() => undefined).finally(() => { if (!background) this.foreground--; });
     return operation;
   }
 }

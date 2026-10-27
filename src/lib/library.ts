@@ -114,7 +114,9 @@ export interface BookEntry {
   book: Book;
 }
 
-export async function listBooks(root: string): Promise<BookEntry[]> {
+export interface BookProblem { dirName: string; message: string }
+
+export async function listBooks(root: string, onProblem?: (problem: BookProblem) => void): Promise<BookEntry[]> {
   const out: BookEntry[] = [];
   let entries: string[] = [];
   try {
@@ -125,12 +127,18 @@ export async function listBooks(root: string): Promise<BookEntry[]> {
   for (const name of entries) {
     if (!name.endsWith('/')) continue;
     const dirName = name.slice(0, -1);
-    const bookPath = joinPath(joinPath(root, dirName), 'book.json');
-    const v = await readJsonOrNull(bookPath);
-    if (!v) continue;
-    const book = v as unknown as Book;
-    if (!book?.id || !Array.isArray(book.chapters)) continue;
-    out.push({ dirName, book });
+    const bookDir = joinPath(root, dirName);
+    const bookPath = joinPath(bookDir, 'book.json');
+    try {
+      // Recovery must be reachable even when the first live file was moved away.
+      if (await exists(joinPath(bookDir, '.restore-journal.json'))) await recoverBookRestore(root, dirName);
+      if (!(await exists(bookPath))) continue;
+      const book = await readJson(bookPath) as unknown as Book;
+      if (!book?.id || !Array.isArray(book.chapters) || !book.stats) throw Error('作品目录格式不完整');
+      out.push({ dirName, book });
+    } catch (error) {
+      onProblem?.({ dirName, message: '作品尚未恢复或目录无法读取：' + String(error) });
+    }
   }
   out.sort((a, b) => (a.book.updatedAt < b.book.updatedAt ? 1 : -1));
   return out;
@@ -331,16 +339,7 @@ export async function saveChapterWithStats(
   };
   await saveBook(root, dirName, next);
 
-  // 每天第一次真正落盘时自动做一份快照（安全垫：恢复点最多回退到今天开始时）
-  if (isDesktop && next.chapters.length > 0 && next.lastAutoSnapshot !== todayStr()) {
-    try {
-      await createSnapshot(root, dirName, true);
-      await saveBook(root, dirName, { ...next, lastAutoSnapshot: todayStr() });
-      next.lastAutoSnapshot = todayStr();
-    } catch {
-      onWarning?.('正文已保存，但每日自动备份失败。请点“备份 / 快照”重试。');
-    }
-  }
+  // Daily snapshots are scheduled after this foreground save, outside its await chain.
   return next;
 }
 
