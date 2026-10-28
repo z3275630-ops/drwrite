@@ -14,6 +14,8 @@ export const SceneMark = Node.create({
   addAttributes() {
     return {
       title: { default: '' },
+      id: { default: null },
+      summary: { default: '' },
     };
   },
 
@@ -33,7 +35,7 @@ export const SceneMark = Node.create({
 
   addKeyboardShortcuts() {
     return {
-      'Mod-Alt-s': () => this.editor.commands.insertContent({ type: this.name, attrs: { title: '' } }),
+      'Mod-Alt-s': () => this.editor.commands.insertContent({ type: this.name, attrs: { id: crypto.randomUUID(), title: '' } }),
     };
   },
 });

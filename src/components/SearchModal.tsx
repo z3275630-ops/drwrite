@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Book, Character, LoreEntry } from '../types';
 import { docToPlainText } from '../lib/words';
 import { readChapter } from '../lib/library';
 import { aliasMatch } from '../lib/entities';
 import { Modal } from './Modal';
 import type { EntityTarget } from './types';
+import { ChapterTextSearch } from '../lib/chapterSearch';
 
 type Result =
   | { kind: 'character' | 'lore'; name: string; sub: string; id: string }
@@ -29,15 +30,22 @@ export default function SearchModal(props: {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Result[]>([]);
   const [searching, setSearching] = useState(false);
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
+  const engine = useRef(new ChapterTextSearch()).current;
 
   useEffect(() => {
+    engine.invalidate();
+    let alive = true;
     const q = query.trim();
+    setError(''); setResults([]);
     if (!q) {
-      setResults([]);
+      setSearching(false);
       return;
     }
     setSearching(true);
     const t = window.setTimeout(async () => {
+      try {
       const out: Result[] = [];
       for (const c of props.chars) {
         if (aliasMatch(c.name, c.aliases, q)) out.push({ kind: 'character', id: c.id, name: c.name, sub: `人物 · ${c.tier}` });
@@ -45,28 +53,17 @@ export default function SearchModal(props: {
       for (const l of props.lore) {
         if (aliasMatch(l.name, l.aliases, q)) out.push({ kind: 'lore', id: l.id, name: l.name, sub: `设定 · ${l.category}` });
       }
-      const ql = q.toLowerCase();
-      for (const meta of props.book.chapters) {
-        const file = await readChapter(props.root, props.dirName, meta.id);
-        if (!file) continue;
-        const text = docToPlainText(file.doc as never);
-        const lower = text.toLowerCase();
-        const hits: string[] = [];
-        let idx = lower.indexOf(ql);
-        while (idx !== -1 && hits.length < 3) {
-          hits.push(snippet(text, idx, q.length));
-          idx = lower.indexOf(ql, idx + q.length);
-        }
-        if (hits.length) {
-          out.push({ kind: 'chapter', chapterId: meta.id, label: `第${meta.index + 1}章 ${meta.title}`, snippets: hits });
-        }
-      }
-      setResults(out);
-      setSearching(false);
+      const chapterHits = await engine.search(props.root + '/' + props.dirName, props.book.chapters, q, async id => {
+        const file = await readChapter(props.root, props.dirName, id);
+        if (!file) throw Error('章节无法读取：' + (props.book.chapters.find(chapter => chapter.id === id)?.title ?? id));
+        return docToPlainText(file.doc as never);
+      });
+      if (alive && chapterHits) { setResults([...out, ...chapterHits.map(hit => ({ ...hit, kind: 'chapter' as const }))]); setSearching(false); }
+      } catch (reason) { if (alive) { setError(String(reason)); setSearching(false); } }
     }, 260);
-    return () => window.clearTimeout(t);
+    return () => { alive = false; window.clearTimeout(t); engine.invalidate(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, props.chars, props.lore, props.book]);
+  }, [query, props.chars, props.lore, props.book, props.root, props.dirName, retry, engine]);
 
   return (
     <Modal title="全书搜索" width={600} onClose={props.onClose}>
@@ -78,6 +75,7 @@ export default function SearchModal(props: {
         onChange={(e) => setQuery(e.target.value)}
       />
       <div className="search-results">
+        {error && <p role="alert">{error} <button className="link-btn" onClick={() => setRetry(value => value + 1)}>重试读取</button></p>}
         {!query && <div className="entity-empty">输入关键词，正文与资料一起搜</div>}
         {query && searching && <div className="entity-empty">搜索中…</div>}
         {query && !searching && !results.length && <div className="entity-empty">没有找到「{query}」</div>}

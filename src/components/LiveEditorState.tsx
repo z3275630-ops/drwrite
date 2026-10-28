@@ -15,6 +15,7 @@ function words(editor: Editor | null): number {
   if (value === undefined) { value = countWords(docToPlainText(editor.getJSON() as unknown as JsonValue)); counts.set(doc, value); }
   return value;
 }
+export { words as editorWordCount };
 export function LiveWordCount({ editor, saved, footer = false }: { editor: Editor | null; saved?: number; footer?: boolean }) {
   const value = useEditorState({ editor, selector: ({ editor }) => words(editor) }) ?? 0;
   return <>{footer ? '本章 ' : ''}{fmtNum(value)} 字{footer && saved !== undefined && saved !== value ? `（已存 ${fmtNum(saved)}）` : ''}</>;

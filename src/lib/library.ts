@@ -22,6 +22,7 @@ export { createSnapshot, listSnapshots, restoreSnapshot } from './snapshots';
 export type { SnapshotInfo } from './snapshots';
 import * as ent from './entities';
 import { GENRE_TEMPLATES } from './templates';
+import { acquireBookLease } from './bookLease';
 
 export { genId, nowIso, todayStr };
 
@@ -132,7 +133,10 @@ export async function listBooks(root: string, onProblem?: (problem: BookProblem)
     try {
       // Recovery must be reachable even when the first live file was moved away.
       if (await exists(joinPath(bookDir, '.restore-journal.json'))) await recoverBookRestore(root, dirName);
-      if (!(await exists(bookPath))) continue;
+      if (!(await exists(bookPath))) {
+        if (await exists(joinPath(bookDir, 'snapshots'))) onProblem?.({ dirName, message: '作品目录文件缺失，已有备份仍可只读查看；未以空白目录覆盖。' });
+        continue;
+      }
       const book = await readJson(bookPath) as unknown as Book;
       if (!book?.id || !Array.isArray(book.chapters) || !book.stats) throw Error('作品目录格式不完整');
       out.push({ dirName, book });
@@ -180,6 +184,9 @@ export async function createBook(
     bookDir = joinPath(root, dirName);
   }
 
+  await mkdir(bookDir);
+  const release = await acquireBookLease(root, dirName);
+  try {
   const first = newChapterMeta('第一章');
   first.index = 0;
   const book: Book = {
@@ -217,6 +224,7 @@ export async function createBook(
     }
   }
   return { dirName, book };
+  } finally { await release(); }
 }
 
 /* ---------- 书与章节读写 ---------- */

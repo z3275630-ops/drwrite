@@ -1,10 +1,14 @@
+import { UiSelect } from './Controls';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, Prop, RefIndexEntry } from '../types';
 import { chatAi } from '../lib/ai';
 import type { AiConfig, AiMessage } from '../lib/ai';
 import { entityCardLines } from '../lib/assembler';
 import * as st from '../lib/structure';
-import { loadChat, saveChat } from '../lib/chat';
+import { listSessions, newChatSession, readSession, saveSession, uniqueSessionTitle, type ChatSession } from '../lib/chatSessions';
+import { Modal } from './Modal';
+import { ContextReviewModal, type ContextReview } from './ContextReviewModal';
+import { DEFAULT_CONTEXT_POLICY, type BudgetSource } from '../lib/contextBudget';
 import type { ChatMsg } from '../lib/chat';
 import { toast } from './Toast';
 import { SaveCoordinator } from '../lib/saveCoordinator';
@@ -62,6 +66,13 @@ export default function ChatPanel(props: {
   onBusyChange: (busy: boolean) => void;
   onRegisterFlush: (flush: () => Promise<boolean>) => void;
 }) {
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const sessionRef = useRef<ChatSession | null>(null);
+  const draftRef = useRef('');
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [rename, setRename] = useState<string | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [review, setReview] = useState<ContextReview | null>(null);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -82,6 +93,7 @@ export default function ChatPanel(props: {
     fores: true,
     summary: true,
   });
+  const contextRef = useRef(ctx); contextRef.current = ctx;
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadedRef = useRef(false);
@@ -92,14 +104,21 @@ export default function ChatPanel(props: {
   }, [saver]);
   const persist = useCallback(async () => {
     if (!loadedRef.current) return true;
-    const ok = await saver.flush(() => saveChat(props.root, props.dirName, messageRef.current));
+    const ok = await saver.flush(async () => {
+      if (!sessionRef.current) throw Error('会话尚未就绪');
+      const snapshot = { ...sessionRef.current, messages: [...messageRef.current], draft: draftRef.current, context: { ...contextRef.current } };
+      await saveSession(props.root, props.dirName, snapshot);
+      sessionRef.current = { ...sessionRef.current, messages: snapshot.messages, draft: snapshot.draft, context: snapshot.context };
+      setSessions(previous => previous.map(session => session.id === snapshot.id ? snapshot : session));
+    });
     setSaveError(ok ? '' : '对话未保存，内容仍在本书界面。' + String(saver.error));
     return ok;
   }, [props.root, props.dirName, saver]);
   const flushBeforeLeave = useCallback(async () => {
+    if (sessionBusy) { setLeaveNotice('会话正在保存或切换，请稍候再离开。'); return false; }
     if (sendingRef.current) { setLeaveNotice('顾问仍在生成，已取消离开；请等回复完成。正文可以继续写。'); return false; }
     return persist();
-  }, [persist]);
+  }, [persist, sessionBusy]);
   useEffect(() => {
     props.onRegisterFlush(flushBeforeLeave);
     return () => props.onRegisterFlush(async () => true);
@@ -109,24 +128,61 @@ export default function ChatPanel(props: {
     return () => props.onBusyChange(false);
   }, [sending, props.onBusyChange]);
 
+  const installSession = (session: ChatSession) => {
+    sessionRef.current = session; messageRef.current = session.messages; draftRef.current = session.draft;
+    contextRef.current = session.context; setCtx(session.context); setMsgs(session.messages); setInput(session.draft);
+    saver.reset(); setSaveError(''); setRequestError(''); setLeaveNotice('');
+    loadedRef.current = true; setLoaded(true);
+  };
   useEffect(() => {
     let alive = true;
-    void loadChat(props.root, props.dirName).then((m) => {
-      if (!alive) return;
-      messageRef.current = m;
-      setMsgs(m);
-      loadedRef.current = true;
-      setLoaded(true);
+    void listSessions(props.root, props.dirName).then(result => {
+      if (!alive) return; setSessions(result.sessions); setLoadError(result.warnings.join('\n'));
+      if (result.sessions[0]) installSession(result.sessions[0]);
     }).catch(error => { if (alive) setLoadError(String(error)); });
     return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.root, props.dirName]);
+  const changeSession = async (id?: string) => {
+    if (sendingRef.current || sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      if (!(await persist())) return;
+      const session = id ? await readSession(props.root, props.dirName, id) : newChatSession(uniqueSessionTitle(sessions));
+      if (!id) { await saveSession(props.root, props.dirName, session); setSessions(previous => [session, ...previous]); }
+      installSession(session);
+    } catch (error) { setSaveError('未切换会话，当前内容仍保留：' + String(error)); }
+    finally { setSessionBusy(false); }
+  };
+  const renameSession = async () => {
+    if (!rename?.trim() || !sessionRef.current) return;
+    sessionRef.current = { ...sessionRef.current, title: rename.trim() }; saver.markDirty();
+    if (await persist()) setRename(null);
+  };
+  const archiveSession = async () => {
+    if (!sessionRef.current || sendingRef.current || sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      if (!(await persist())) return;
+      const old = sessionRef.current;
+      const remaining = sessions.filter(session => session.id !== old.id);
+      const next = remaining[0] ? await readSession(props.root, props.dirName, remaining[0].id) : newChatSession();
+      if (!remaining.length) await saveSession(props.root, props.dirName, next);
+      await saveSession(props.root, props.dirName, { ...old, archived: true });
+      setSessions(remaining.length ? remaining : [next]); installSession(next); setArchiveOpen(false);
+    } catch (error) { setSaveError('会话未移除：' + String(error)); }
+    finally { setSessionBusy(false); }
+  };
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [msgs, sending, streamText]);
+  useEffect(() => {
+    if (!loaded || sending || sessionBusy) return;
+    const timer = window.setTimeout(() => void persist(), 1000);
+    return () => window.clearTimeout(timer);
+  }, [input, ctx, loaded, sending, sessionBusy, persist]);
 
-  const buildContext = (): AiMessage => {
+  const buildContext = (): { base: AiMessage; sources: BudgetSource[] } => {
     const chapterTail = props.getChapterTail();
     const meta = props.book.chapters.find((c) => c.id === props.activeChapterId);
     const relatedIds = [
@@ -145,17 +201,13 @@ export default function ChatPanel(props: {
     const fores = props.foreshadows
       .slice(0, 12)
       .map((f) => `· ${f.title}（${st.foreshadowStateOf(f, props.book.chapters)}）`);
-    const blocks = [
-      `作品：《${props.book.title}》`,
-      ctx.summary && props.book.plotSummary ? '剧情总览：\n' + props.book.plotSummary : '',
-      ctx.cards && allCards.length ? '设定资料：\n' + allCards.join('\n') : '',
-      ctx.fores && fores.length ? '伏笔清单：\n' + fores.join('\n') : '',
-      meta
-        ? `当前在第${meta.index + 1}章「${meta.title}」${meta.synopsis ? '，梗概：' + meta.synopsis : ''}`
-        : '',
-      ctx.body && chapterTail ? '当前章正文结尾：\n…' + chapterTail.slice(-800) : '',
-    ].filter(Boolean);
-    return {
+    const sources: BudgetSource[] = [
+      { key: 'summary', label: '剧情总览', text: ctx.summary ? props.book.plotSummary ?? '' : '', priority: 30, tail: true },
+      { key: 'cards', label: '相关资料', text: ctx.cards ? allCards.join('\n') : '', priority: 70 },
+      { key: 'fores', label: '伏笔清单', text: ctx.fores ? fores.join('\n') : '', priority: 40 },
+      { key: 'body', label: '当前章正文结尾', text: ctx.body ? chapterTail.slice(-2000) : '', priority: 100, tail: true },
+    ];
+    return { sources: sources.filter(source => source.text), base: {
       role: 'system',
       content:
         '你是一位中文长篇小说的写作顾问，正在陪作者讨论《' +
@@ -165,12 +217,11 @@ export default function ChatPanel(props: {
         '2. 可以讨论情节走向、人物弧光、伏笔回收、文风节奏；需要时给 2-3 个方案并说明取舍。\n' +
         '3. 你不能直接修改正文；如果作者要求代写，给出文字建议让他自己采纳。\n' +
         '4. 不确定的事实先问清楚再回答，不要编造设定。\n\n' +
-        blocks.join('\n\n'),
-    };
+        (meta ? `当前在第${meta.index + 1}章「${meta.title}」` : ''),
+    } };
   };
 
-  const send = async (override?: string) => {
-    const text = (override ?? input).trim();
+  const requestSend = async (text: string, messages: AiMessage[]) => {
     if (!text || sendingRef.current || !loadedRef.current) return;
     if (!props.aiCfg) {
       props.onNeedSettings();
@@ -180,7 +231,7 @@ export default function ChatPanel(props: {
     const next = [...messageRef.current, userMsg];
     updateMessages(next);
     void persist();
-    setInput('');
+    draftRef.current = ''; setInput(''); saver.markDirty();
     sendingRef.current = true;
     setSending(true);
     setRequestError('');
@@ -188,10 +239,9 @@ export default function ChatPanel(props: {
     streamRef.current = '';
     setStreamText('');
     try {
-      const history: AiMessage[] = next.slice(-12).map((m) => ({ role: m.role, content: m.content }));
       const r = await chatAi(
         props.aiCfg,
-        [buildContext(), ...history],
+        messages,
         { maxTokens: 1400, temperature: 0.7 },
         { onContent: (full) => { streamRef.current = full; setStreamText(full); } }
       );
@@ -209,6 +259,22 @@ export default function ChatPanel(props: {
       setStreamText('');
       await persist();
     }
+  };
+
+  const send = async (override?: string) => {
+    const text = (override ?? input).trim();
+    if (!text || sendingRef.current || !loadedRef.current || sessionBusy) return;
+    if (!props.aiCfg) { props.onNeedSettings(); return; }
+    const context = buildContext();
+    const history: AiMessage[] = [...messageRef.current, { role: 'user' as const, content: text }].slice(-12).map(message => ({ role: message.role, content: message.content }));
+    const sessionId = sessionRef.current?.id;
+    setReview({ base: [context.base, ...history], sources: context.sources, initial: sessionRef.current?.budget ?? DEFAULT_CONTEXT_POLICY,
+      onCancel: () => setReview(null), onSend: (messages, policy) => {
+        if (sessionRef.current?.id !== sessionId) { setReview(null); return; }
+        sessionRef.current = { ...sessionRef.current!, budget: policy }; saver.markDirty();
+        setReview(null); void requestSend(text, messages);
+      },
+    });
   };
 
   const copy = async (text: string) => {
@@ -251,6 +317,17 @@ export default function ChatPanel(props: {
         }}>重新请求</button>}
       </div>}
 
+      <div className="chat-session-tools">
+        <UiSelect aria-label="本地对话会话" disabled={sending || sessionBusy || !loaded} value={sessionRef.current?.id ?? ''} onChange={event => void changeSession(event.target.value)}>
+          {sessions.map(session => <option key={session.id} value={session.id}>{session.title}</option>)}
+        </UiSelect>
+        <button className="link-btn" disabled={sending || sessionBusy} onClick={() => void changeSession()}>新建</button>
+        <button className="link-btn" disabled={sending || sessionBusy || !loaded} onClick={() => setRename(sessionRef.current?.title ?? '')}>改名</button>
+        <button className="link-btn" disabled={sending || sessionBusy || !loaded} onClick={() => setArchiveOpen(true)}>移除</button>
+      </div>
+      {rename !== null && <Modal title="会话改名" onClose={() => setRename(null)}><input aria-label="会话名称" value={rename} onChange={event => setRename(event.target.value)} /><button className="primary-btn" onClick={() => void renameSession()}>保存名称</button></Modal>}
+      {archiveOpen && <Modal title="移除当前会话" onClose={() => setArchiveOpen(false)} busy={sessionBusy}><p>从会话列表移除“{sessionRef.current?.title}”？磁盘上的原记录保留为归档，其他会话不受影响。</p><button className="danger-btn" onClick={() => void archiveSession()}>移除当前会话</button></Modal>}
+      <p className="chat-history-note">本地保留完整记录；本次模型只带最近 12 条消息，发送前可查看。</p>
       <div className="chat-context-bar" role="group" aria-label="本次对话带上的上下文">
         <span className="chat-context-label">带上</span>
         {CTX_PILLS.map((p) => (
@@ -259,7 +336,7 @@ export default function ChatPanel(props: {
             className={'chat-ctx-pill' + (ctx[p.key] ? ' on' : '')}
             title={p.title}
             aria-pressed={ctx[p.key]}
-            onClick={() => setCtx((c) => ({ ...c, [p.key]: !c[p.key] }))}
+            onClick={() => { const next = { ...ctx, [p.key]: !ctx[p.key] }; contextRef.current = next; setCtx(next); saver.markDirty(); }}
           >
             {p.label}
           </button>
@@ -343,7 +420,7 @@ export default function ChatPanel(props: {
             value={input}
             disabled={!loaded}
             placeholder="问情节、人物、伏笔……"
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => { draftRef.current = e.target.value; setInput(e.target.value); saver.markDirty(); }}
             onKeyDown={(e) => {
               if (e.nativeEvent.isComposing) return;
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -368,33 +445,13 @@ export default function ChatPanel(props: {
         </div>
       </div>
 
-      {confirmClear && (
-        <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setConfirmClear(false)}>
-          <div className="modal-card small">
-            <div className="modal-head">
-              <span>清空对话</span>
-            </div>
-            <div className="modal-body">
-              <p className="confirm-text">清空这本书的 AI 对话记录？正文与资料不受影响。</p>
-              <div className="modal-actions">
-                <button className="ghost-btn" onClick={() => setConfirmClear(false)}>
-                  取消
-                </button>
-                <button
-                  className="danger-btn"
-                  onClick={() => {
-                    updateMessages([]);
-                    void persist();
-                    setConfirmClear(false);
-                  }}
-                >
-                  清空
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {review && <ContextReviewModal request={review} />}
+      {confirmClear && <Modal title="清空当前会话" onClose={() => setConfirmClear(false)}>
+        <p>清空“{sessionRef.current?.title}”中的消息？其他会话、正文与资料不受影响。</p>
+        <button className="ghost-btn" onClick={() => setConfirmClear(false)}>取消</button>
+        <button className="danger-btn" onClick={async () => { updateMessages([]); if (await persist()) setConfirmClear(false); }}>清空本会话</button>
+      </Modal>}
+
     </aside>
   );
 }

@@ -7,6 +7,7 @@ import type { Book, ChapterFile, ChapterMeta } from '../types';
 import { MODEL_VERSION } from '../types';
 import type { JsonValue } from './json';
 import { createBook, writeChapter, saveBook } from './library';
+import { acquireBookLease } from './bookLease';
 import { countWords } from './words';
 import { genId, nowIso } from './id';
 
@@ -84,6 +85,8 @@ export async function importTxtBook(
   dailyGoal?: number
 ): Promise<{ dirName: string; book: Book }> {
   const { dirName, book } = await createBook(root, title, dailyGoal);
+  const release = await acquireBookLease(root, dirName);
+  try {
   const metas: ChapterMeta[] = [];
   for (let i = 0; i < parsed.length; i++) {
     const c = parsed[i];
@@ -108,6 +111,7 @@ export async function importTxtBook(
   };
   await saveBook(root, dirName, next);
   return { dirName, book: next };
+  } finally { await release(); }
 }
 
 /** 读 TXT 文件文本：桌面端走 Rust（UTF-8/GBK 自适应），浏览器端 FileReader（GBK 用 TextDecoder） */

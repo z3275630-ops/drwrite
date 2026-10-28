@@ -51,10 +51,11 @@ assert(data.has('root/bad/.restore-journal.json'));
 // R2: request completion and durable save are separate; retry never requests the model.
 let diskFails = true, modelCalls = 0, mode = 'complete', stored = [], visible = [], saveError = '';
 const saver = new SaveCoordinator(), messageRef = { current: [] }, streamRef = { current: '' }, sendingRef = { current: false };
-const chat = await subject('src/components/ChatPanel.tsx', ['updateMessages', 'persist', 'send'], {
+const chat = await subject('src/components/ChatPanel.tsx', ['updateMessages', 'persist', 'requestSend'], {
   useCallback: fn => fn, saver, messageRef, streamRef, sendingRef, loadedRef: { current: true }, input: '',
   props: { root: 'root', dirName: 'test', aiCfg: {}, onNeedSettings: () => assert.fail('configured') },
-  saveChat: async (_root, _dir, messages) => { if (diskFails) throw Error('disk full'); stored = structuredClone(messages); },
+  sessionRef: { current: { id: 'session-test', title: 'test' } }, draftRef: { current: '' }, contextRef: { current: {} }, setSessions() {},
+  saveSession: async (_root, _dir, session) => { if (diskFails) throw Error('disk full'); stored = structuredClone(session.messages); },
   setMsgs: messages => { visible = messages; }, setSaveError: error => { saveError = error; },
   setInput() {}, setSending() {}, setRequestError() {}, setLeaveNotice() {}, setStreamText() {}, buildContext: () => ({ role: 'system', content: 'test' }),
   chatAi: async (_cfg, _messages, _opts, events) => {
@@ -64,20 +65,34 @@ const chat = await subject('src/components/ChatPanel.tsx', ['updateMessages', 'p
     events.onContent('complete answer'); return { text: 'complete answer' };
   },
 });
-await chat.send('question');
+const send = text => chat.requestSend(text, [{ role: 'user', content: text }]);
+await send('question');
 assert.deepEqual(visible.map(m => m.role), ['user', 'assistant']);
 assert.equal(visible[1].content, 'complete answer'); assert(saver.dirty); assert.match(saveError, /disk full/);
 assert.equal(await chat.persist(), false);
-await chat.send('second question'); assert.equal(visible.length, 4);
+await send('second question'); assert.equal(visible.length, 4);
 diskFails = false; assert.equal(await chat.persist(), true); assert.equal(stored.length, 4); assert.equal(modelCalls, 2);
-mode = 'partial'; await chat.send('partial question'); assert.equal(stored.at(-1).content, 'retained fragment'); assert(stored.at(-1).incomplete);
-mode = 'failed'; await chat.send('failed question'); assert.equal(visible.at(-1).role, 'user');
+mode = 'partial'; await send('partial question'); assert.equal(stored.at(-1).content, 'retained fragment'); assert(stored.at(-1).incomplete);
+mode = 'failed'; await send('failed question'); assert.equal(visible.at(-1).role, 'user');
 diskFails = true; chat.updateMessages([]); assert.equal(await chat.persist(), false); assert(saver.dirty);
 diskFails = false; assert.equal(await chat.persist(), true); assert.deepEqual(stored, []);
 const loadChat = (await subject('src/lib/chat.ts', ['loadChat'], {
   chatPath: () => 'test', exists: async () => true, readJson: async () => ({ malformed: true }),
 })).loadChat;
 await assert.rejects(loadChat('root', 'test'), /损坏/);
+let review, approved;
+const session = { current: { id: 'approved-session' } };
+const staged = await subject('src/components/ChatPanel.tsx', ['send'], {
+  input: 'draft question', sendingRef: { current: false }, loadedRef: { current: true }, sessionBusy: false,
+  props: { aiCfg: {} }, buildContext: () => ({ base: { role: 'system', content: 'system' }, sources: [{ key: 'cards', label: 'cards', text: 'offered source' }] }),
+  messageRef: { current: [{ role: 'assistant', content: 'history' }] }, sessionRef: session,
+  DEFAULT_CONTEXT_POLICY: { maxChars: 12000, disabled: [] }, setReview: value => { review = value; }, saver,
+  requestSend: (text, messages) => { approved = { text, messages }; },
+});
+await staged.send(); assert.equal(approved, undefined); assert.equal(review.base.at(-1).content, 'draft question');
+const exactMessages = [{ role: 'user', content: 'approved exact payload' }];
+review.onSend(exactMessages, { maxChars: 6000, disabled: ['cards'] });
+assert.equal(approved.messages, exactMessages); assert.deepEqual(session.current.budget.disabled, ['cards']);
 
 // R3: deterministic timer/clock verifies rate limiting and manual recovery.
 let now = 0, timerId = 0; const timers = new Map();

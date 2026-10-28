@@ -1,3 +1,4 @@
+import { UiSelect } from './Controls';
 import { useEffect, useRef, useState } from 'react';
 import type { Book, Character, Foreshadow, LoreEntry, TimelineEvent } from '../types';
 import type { TimelineData } from '../lib/structure';
@@ -28,7 +29,8 @@ export default function StructureTab(props: {
   loadScenes: (chapterId: string) => Promise<SceneInfo[]>;
   onTimelineChange: (t: TimelineData) => void;
   onForeshadowsChange: (f: Foreshadow[]) => void;
-  onJumpChapter: (chapterId: string, blockIndex?: number) => void;
+  onJumpChapter: (chapterId: string, blockIndex?: number, sceneId?: string) => void;
+  onStoryCalendar: () => void;
   onConsistencyCheck: () => void;
   onInspectEntity: (t: EntityTarget) => void;
   aiReady: boolean;
@@ -147,25 +149,6 @@ export default function StructureTab(props: {
     }
   };
 
-  const fillAll = async () => {
-    if (!confirmFill) {
-      setConfirmFill(true);
-      window.setTimeout(() => setConfirmFill(false), 4000);
-      return;
-    }
-    setConfirmFill(false);
-    setFillBusy(true);
-    try {
-      await props.onFillSynopses((done, total) => setFillProgress({ done, total }));
-      toast('梗概补全完成');
-    } catch (e) {
-      toast(String(e instanceof Error ? e.message : e), 'err');
-    } finally {
-      setFillBusy(false);
-      setFillProgress(null);
-    }
-  };
-
   /* ---------- 地点树 ---------- */
 
   const persistTree = (t: loc.LocationTree) => {
@@ -219,7 +202,7 @@ export default function StructureTab(props: {
               </span>
             )}
             <span className="loc-ops">
-              <select
+              <UiSelect
                 value={n.loreId ?? ''}
                 title="绑定「地点」类设定词条"
                 onChange={(e) =>
@@ -236,7 +219,7 @@ export default function StructureTab(props: {
                     {l.name}
                   </option>
                 ))}
-              </select>
+              </UiSelect>
               <button className="op" title="添加下级" onClick={() => persistTree({ nodes: [...(tree?.nodes ?? []), loc.newNode('新地点', n.id)] })}>
                 ＋
               </button>
@@ -285,24 +268,12 @@ export default function StructureTab(props: {
           >
             查看 / 编辑
           </button>
-          {missingSyn > 0 && (
-            <button
-              className="ghost-btn small"
-              disabled={!props.aiReady || fillBusy}
-              title={`有 ${missingSyn} 章写了正文但没有梗概；总览按章节梗概汇总`}
-              onClick={() => void fillAll()}
-            >
-              {fillBusy
-                ? `补梗概 ${fillProgress ? fillProgress.done + '/' + fillProgress.total : '…'}`
-                : confirmFill
-                  ? `确认：共 ${missingSyn} 次AI调用`
-                  : `补全缺失梗概（${missingSyn}）`}
-            </button>
-          )}
+          <button className="ghost-btn small" onClick={() => void props.onFillSynopses(() => {})}>批量梗概任务</button>
         </div>
       </div>
 
       <div className="struct-switch" ref={switchRef}>
+        <button onClick={props.onStoryCalendar}>故事时间</button>
         <button className={sub === 'timeline' ? 'on' : ''} onClick={() => setSub('timeline')}>
           时间线
         </button>
@@ -618,7 +589,9 @@ function EventModal(props: {
       setScenes([]);
       return;
     }
-    void props.loadScenes(cid).then(setScenes);
+    let alive = true;
+    void props.loadScenes(cid).then(value => { if (alive) setScenes(value); }).catch(error => { if (alive) { setScenes([]); toast('场景读取失败：' + String(error), 'err'); } });
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ev.anchor?.chapterId]);
 
@@ -636,7 +609,7 @@ function EventModal(props: {
           <button
             key={s.blockIndex}
             className={'chip toggle' + (on ? ' on' : '')}
-            onClick={() => setEv({ ...ev, anchor: { chapterId: ev.anchor!.chapterId, blockIndex: s.blockIndex } })}
+            onClick={() => setEv({ ...ev, anchor: { chapterId: ev.anchor!.chapterId, blockIndex: s.blockIndex, sceneId: s.id } })}
           >
             ◇ {sceneLabel(s, i + 1)}
           </button>
@@ -655,17 +628,17 @@ function EventModal(props: {
       <div className="form-grid">
         <label className="field">
           <span>剧情线</span>
-          <select value={ev.laneId} onChange={(e) => setEv({ ...ev, laneId: e.target.value })}>
+          <UiSelect value={ev.laneId} onChange={(e) => setEv({ ...ev, laneId: e.target.value })}>
             {props.timeline.lanes.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.name}
               </option>
             ))}
-          </select>
+          </UiSelect>
         </label>
         <label className="field">
           <span>发生在哪一章</span>
-          <select
+          <UiSelect
             value={ev.anchor?.chapterId ?? ''}
             onChange={(e) => setEv({ ...ev, anchor: e.target.value ? { chapterId: e.target.value } : null })}
           >
@@ -675,7 +648,7 @@ function EventModal(props: {
                 第{c.index + 1}章 {c.title}
               </option>
             ))}
-          </select>
+          </UiSelect>
         </label>
       </div>
       {ev.anchor && (
@@ -775,7 +748,7 @@ function ForeModal(props: {
       />
       <label className="field">
         <span>回收章节（选了就是已回收）</span>
-        <select
+        <UiSelect
           value={f.payoffAnchor?.chapterId ?? ''}
           onChange={(e) => setF({ ...f, payoffAnchor: e.target.value ? { chapterId: e.target.value } : null })}
         >
@@ -785,7 +758,7 @@ function ForeModal(props: {
               第{c.index + 1}章 {c.title}
             </option>
           ))}
-        </select>
+        </UiSelect>
       </label>
       <div className="modal-actions">
         {props.f.title && (

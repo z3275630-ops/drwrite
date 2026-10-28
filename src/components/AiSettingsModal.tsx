@@ -53,7 +53,7 @@ export default function AiSettingsModal(props: {
   };
 
   return (
-    <Modal title="AI 设置（用你自己的密钥）" width={560} onClose={props.onClose}>
+    <Modal title="AI 设置（用你自己的密钥）" width={560} layer={240} onClose={props.onClose}>
       <p className="hint-text">
         配置保存在本机。使用在线 AI 时，所选正文与资料会发送到你配置的服务商，密钥用于该接口认证；使用本地 Ollama 可在本机处理。
       </p>

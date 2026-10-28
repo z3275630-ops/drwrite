@@ -148,6 +148,8 @@ export interface ChapterMeta {
   id: ChapterId;
   index: number; // 派生：按目录顺序，不存进标题
   title: string;
+  workflow?: import('../lib/chapterWorkflow').ChapterWorkflow;
+  workflowUpdatedAt?: string;
   /** 本章意图/梗概 —— 手写字段，AI 永不覆盖 */
   synopsis?: string;
   /** 本章章纲（P5）：动笔前的要点清单，续写时随身带上 */
@@ -191,6 +193,7 @@ export interface Book {
   id: string;
   protocolVersion: number;
   title: string;
+  sampleKey?: string;
   /** 流派模板引用（P3）：玄幻/都市/科幻… */
   genreTemplate?: string;
   /** 日更目标字数 */
@@ -223,8 +226,10 @@ export interface TimelineEvent {
   laneId: string;
   title: string;
   /** 锚点：指向章节+段落（信息型连接，只跳转不反写） */
-  anchor: { chapterId: ChapterId; blockIndex?: number } | null;
+  anchor: { chapterId: ChapterId; blockIndex?: number; sceneId?: string } | null;
   relatedEntityIds: EntityId[];
+  storyTime?: import('../lib/storyTime').StoryTime;
+  endTime?: import('../lib/storyTime').StoryTime;
 }
 
 export type ForeshadowState =

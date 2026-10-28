@@ -180,11 +180,27 @@ let settingsQueue: Promise<unknown> = Promise.resolve();
 export function updateSettings(patch: Record<string, JsonValue>): Promise<void> {
   const operation = settingsQueue.then(async () => {
     const path = await appSettingsPath();
+    if (isDesktop) { await invokeCmd('patch_json_file', { path, patch }); return; }
     const previous = await exists(path) ? await readJson(path) : {};
     if (!previous || Array.isArray(previous) || typeof previous !== 'object') {
       throw new Error('设置文件格式错误，已停止写入以保留原设置');
     }
     await writeJson(path, { ...previous, ...patch });
+  });
+  settingsQueue = operation.catch(() => undefined);
+  return operation;
+}
+
+/** Atomically replace one preference entry without overwriting other books or AI settings. */
+export function updateSettingEntry(section: string, key: string, value: JsonValue): Promise<void> {
+  const operation = settingsQueue.then(async () => {
+    const path = await appSettingsPath();
+    if (isDesktop) { await invokeCmd('patch_json_file', { path, section, key, patch: value }); return; }
+    const previous = await exists(path) ? await readJson(path) : {};
+    if (!previous || Array.isArray(previous) || typeof previous !== 'object') throw Error('设置文件格式错误');
+    const group = previous[section];
+    if (group != null && (typeof group !== 'object' || Array.isArray(group))) throw Error('设置分组格式错误');
+    await writeJson(path, { ...previous, [section]: { ...group, [key]: value } });
   });
   settingsQueue = operation.catch(() => undefined);
   return operation;

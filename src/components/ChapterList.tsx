@@ -1,6 +1,8 @@
+import { UiSelect } from './Controls';
 import { useEffect, useRef, useState } from 'react';
 import type { ChapterMeta, Volume } from '../types';
 import { fmtNum } from '../lib/library';
+import { filterChapters, WORKFLOWS, type ChapterWorkflow } from '../lib/chapterWorkflow';
 
 const DND_TYPE = 'text/drwrite-chapter';
 const NONE_VOL = '__none__';
@@ -22,6 +24,7 @@ export default function ChapterList(props: {
   onMove: (id: string, dir: -1 | 1) => void;
   onSynopsis: (meta: ChapterMeta) => void;
   onOutline: (meta: ChapterMeta) => void;
+  onWorkflow: (id: string, workflow: ChapterWorkflow) => void;
   /** 拖拽排序：把 dragId 挪到 targetId 的前/后 */
   onReorder: (dragId: string, targetId: string, pos: 'before' | 'after') => void;
   /** 把章节拖进某卷（null = 移回未分卷） */
@@ -39,6 +42,10 @@ export default function ChapterList(props: {
   const [volDraft, setVolDraft] = useState('');
   const [addingVol, setAddingVol] = useState(false);
   const [newVol, setNewVol] = useState('');
+  const [query, setQuery] = useState('');
+  const [workflow, setWorkflow] = useState('all');
+  const filtered = filterChapters(props.chapters, query, workflow);
+  const filtering = !!query.trim() || workflow !== 'all';
 
   useEffect(() => {
     if (renamingId) inputRef.current?.focus();
@@ -64,16 +71,16 @@ export default function ChapterList(props: {
   const groups: Group[] = props.volumes.map((v) => ({
     key: v.id,
     vol: v,
-    items: props.chapters.filter((c) => c.volumeId === v.id),
+    items: filtered.filter((c) => c.volumeId === v.id),
   }));
-  const unvol = props.chapters.filter((c) => !c.volumeId || !volIds.has(c.volumeId));
+  const unvol = filtered.filter((c) => !c.volumeId || !volIds.has(c.volumeId));
   if (unvol.length || !props.volumes.length) {
     groups.push({ key: NONE_VOL, vol: null, items: unvol });
   }
   const showHeaders = props.volumes.length > 0;
 
   const itemDnd = (c: ChapterMeta) => ({
-    draggable: renamingId !== c.id,
+    draggable: !filtering && renamingId !== c.id,
     onDragStart: (e: React.DragEvent) => {
       e.dataTransfer.setData(DND_TYPE, c.id);
       e.dataTransfer.effectAllowed = 'move';
@@ -83,6 +90,7 @@ export default function ChapterList(props: {
       setVolOver(null);
     },
     onDragOver: (e: React.DragEvent) => {
+      if (filtering) return;
       if (!e.dataTransfer.types.includes(DND_TYPE)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -91,6 +99,7 @@ export default function ChapterList(props: {
       setDropMark((m) => (m && m.id === c.id && m.pos === pos ? m : { id: c.id, pos }));
     },
     onDrop: (e: React.DragEvent) => {
+      if (filtering) return;
       e.preventDefault();
       e.stopPropagation();
       const id = e.dataTransfer.getData(DND_TYPE);
@@ -104,12 +113,14 @@ export default function ChapterList(props: {
 
   const headerDnd = (key: string) => ({
     onDragOver: (e: React.DragEvent) => {
+      if (filtering) return;
       if (!e.dataTransfer.types.includes(DND_TYPE)) return;
       e.preventDefault();
       setVolOver(key);
     },
     onDragLeave: () => setVolOver((v) => (v === key ? null : v)),
     onDrop: (e: React.DragEvent) => {
+      if (filtering) return;
       e.preventDefault();
       const id = e.dataTransfer.getData(DND_TYPE);
       setVolOver(null);
@@ -118,10 +129,17 @@ export default function ChapterList(props: {
   });
 
   return (
-    <div className="chapter-list">
+    <div className={'chapter-list' + (props.chapters.length > 200 ? ' chapter-list--long' : '')}>
       <div className="chapter-list-head">
-        章节 <span className="count">{props.chapters.length}</span>
+        章节 <span className="count">{filtered.length} / {props.chapters.length}</span>
         {showHeaders && <span className="vol-hint">拖章节排序 / 拖进卷名分组</span>}
+      </div>
+      <div className="chapter-filters">
+        <input aria-label="查找章节标题" placeholder="查找章节标题" value={query} onChange={event => setQuery(event.target.value)} />
+        <UiSelect aria-label="筛选章节状态" value={workflow} onChange={event => setWorkflow(event.target.value)}>
+          <option value="all">全部状态</option>{Object.entries(WORKFLOWS).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+        </UiSelect>
+        {filtering && <button className="link-btn" onClick={() => { setQuery(''); setWorkflow('all'); }}>清除筛选后可拖拽排序</button>}
       </div>
       <div className="chapter-items">
         {groups.map((g) => (
@@ -193,6 +211,8 @@ export default function ChapterList(props: {
               return (
                 <div
                   key={c.id}
+                  tabIndex={0} role="group" aria-label={`第${c.index + 1}章 ${c.title}`}
+                  onKeyDown={event => { if (event.target === event.currentTarget && !event.nativeEvent.isComposing && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); props.onSelect(c.id); } }}
                   className={`chapter-item ${c.id === props.activeId ? 'active' : ''} ${c.synopsis ? 'has-syn' : ''}${mark}`}
                   onClick={() => renamingId !== c.id && props.onSelect(c.id)}
                   {...itemDnd(c)}
@@ -219,7 +239,13 @@ export default function ChapterList(props: {
                         {c.outline ? <span className="has-outline" title="已有章纲">纲</span> : null}
                       </span>
                       <span className="chapter-words">{c.wordCount ? fmtNum(c.wordCount) : ''}</span>
-                      <span className="chapter-ops" onClick={(e) => e.stopPropagation()}>
+                      <select className="chapter-workflow" aria-label={`${c.title}状态`} value={c.workflow ?? 'unmarked'}
+                        onClick={event => event.stopPropagation()} onChange={event => props.onWorkflow(c.id, event.target.value as ChapterWorkflow)}>
+                        {Object.entries(WORKFLOWS).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                      </select>
+                      <details className="chapter-more" onClick={(e) => e.stopPropagation()}>
+                        <summary aria-label={`${c.title}操作`} title="章节操作">⋯</summary>
+                        <div className="chapter-action-menu" onClick={event => { if (event.target instanceof HTMLButtonElement) event.currentTarget.closest('details')?.removeAttribute('open'); }}>
                         <button
                           className="op"
                           title="上移"
@@ -255,7 +281,8 @@ export default function ChapterList(props: {
                         <button className="op danger" title="删除本章" onClick={() => props.onDelete(c)}>
                           删
                         </button>
-                      </span>
+                        </div>
+                      </details>
                       {c.synopsis && (
                         <div
                           className="chapter-syn"

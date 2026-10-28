@@ -1,3 +1,4 @@
+import { UiSelect } from './Controls';
 import { useState } from 'react';
 import type { Character, CharacterTier, LoreCategory, LoreEntry, Prop } from '../types';
 import { propHolder } from '../types';
@@ -85,11 +86,11 @@ export function CharacterFormModal(props: {
         </label>
         <label className="field">
           <span>层级</span>
-          <select value={c.tier} onChange={(e) => set({ tier: e.target.value as CharacterTier })}>
+          <UiSelect value={c.tier} onChange={(e) => set({ tier: e.target.value as CharacterTier })}>
             {TIERS.map((t) => (
               <option key={t}>{t}</option>
             ))}
-          </select>
+          </UiSelect>
         </label>
       </div>
       <label className="field">
@@ -200,14 +201,14 @@ export function CharacterFormModal(props: {
             })}
           {others.length > 0 && (
             <div className="rel-edit-add">
-              <select value={relDraft.targetId} onChange={(e) => setRelDraft({ ...relDraft, targetId: e.target.value })}>
+              <UiSelect value={relDraft.targetId} onChange={(e) => setRelDraft({ ...relDraft, targetId: e.target.value })}>
                 <option value="">选择人物…</option>
                 {others.map((o) => (
                   <option key={o.id} value={o.id}>
                     {o.name}
                   </option>
                 ))}
-              </select>
+              </UiSelect>
               <input
                 placeholder="关系（如 师徒/宿敌）"
                 value={relDraft.label}
@@ -257,11 +258,11 @@ export function LoreFormModal(props: {
         </label>
         <label className="field">
           <span>分类</span>
-          <select value={l.category} onChange={(e) => set({ category: e.target.value as LoreCategory })}>
+          <UiSelect value={l.category} onChange={(e) => set({ category: e.target.value as LoreCategory })}>
             {LORE_CATEGORIES.map((c) => (
               <option key={c}>{c}</option>
             ))}
-          </select>
+          </UiSelect>
         </label>
       </div>
       <label className="field">
@@ -357,22 +358,22 @@ export function PropFormModal(props: {
             );
           })}
           <div className="rel-edit-add">
-            <select value={tChap} onChange={(e) => setTChap(e.target.value)}>
+            <UiSelect value={tChap} onChange={(e) => setTChap(e.target.value)}>
               <option value="">本章</option>
               {props.chapters.map((c) => (
                 <option key={c.id} value={c.id}>
                   第{c.index + 1}章
                 </option>
               ))}
-            </select>
-            <select value={tHolder} onChange={(e) => setTHolder(e.target.value)}>
+            </UiSelect>
+            <UiSelect value={tHolder} onChange={(e) => setTHolder(e.target.value)}>
               <option value="">无人持有</option>
               {props.chars.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
                 </option>
               ))}
-            </select>
+            </UiSelect>
             <input
               placeholder="备注（如 夺得/赠予，可空）"
               value={tNote}

@@ -106,16 +106,17 @@ export interface AssembleInput {
   foreshadows?: Foreshadow[];
 }
 
-export interface ContextSource { label: string; text: string }
+export interface ContextSource { label: string; text: string; originalChars?: number }
 
 /** The preview and the actual request consume exactly the same assembled blocks. */
-export function buildContextSources(input: AssembleInput, chars: Character[], lore: LoreEntry[], props: Prop[] = []): ContextSource[] {
+export function buildContextSources(input: AssembleInput, chars: Character[], lore: LoreEntry[], props: Prop[] = [], generous = false): ContextSource[] {
   const sources: ContextSource[] = [];
-  if (input.plotSummary) sources.push({ label: '剧情总览', text: clip(input.plotSummary, 2400) });
+  const add = (label: string, text: string, limit: number, tail = false, fixed = false) => sources.push({ label, text: generous && !fixed ? text : tail ? recentText(text, limit) : clip(text, limit), originalChars: text.length });
+  if (input.plotSummary) add('剧情总览', input.plotSummary, 2400);
   const cards = entityCardLines(chars, lore, input.relatedIds, props, input.chapter.index);
   if (cards.length) sources.push({ label: '相关资料', text: cards.join('\n') });
-  if (input.outline) sources.push({ label: '本章章纲', text: clip(input.outline, 900) });
-  if (input.scenes?.length) sources.push({ label: '场景标记', text: clip(input.scenes.map((s, i) => `${i + 1}. ${s.title.trim() || '（未命名场景）'}`).join('\n'), 800) });
+  if (input.outline) add('本章章纲', input.outline, 900);
+  if (input.scenes?.length) add('场景标记', input.scenes.map((s, i) => `${i + 1}. ${s.title.trim() || '（未命名场景）'}`).join('\n'), 800);
   const index = (id: string) => input.book.chapters.find((c) => c.id === id)?.index;
   const pending = (input.foreshadows ?? []).filter((f) => {
     const payoff = f.payoffAnchor ? index(f.payoffAnchor.chapterId) : undefined;
@@ -124,10 +125,10 @@ export function buildContextSources(input: AssembleInput, chars: Character[], lo
     });
   }).slice(0, 12);
   if (pending.length) sources.push({ label: '待收伏笔', text: pending.map((f) => '· ' + clip(f.title, 100)).join('\n') });
-  if (input.prevSynopsis) sources.push({ label: '上一章梗概', text: clip(input.prevSynopsis, 150) });
-  if (input.prevChapterTail) sources.push({ label: '上一章结尾', text: recentText(input.prevChapterTail, 600) });
-  if (input.chapterTail) sources.push({ label: input.kind === 'continue' ? '本章前文（最新结尾）' : '选区前文', text: recentText(input.chapterTail, input.kind === 'continue' ? 2000 : 1200) });
-  if (input.chapterAfter && input.kind !== 'continue') sources.push({ label: '选区后文', text: clip(input.chapterAfter, 600) });
+  if (input.prevSynopsis) add('上一章梗概', input.prevSynopsis, 150);
+  if (input.prevChapterTail) add('上一章结尾', input.prevChapterTail, 600, true);
+  if (input.chapterTail) add(input.kind === 'continue' ? '本章前文（最新结尾）' : '选区前文', input.chapterTail, input.kind === 'continue' ? 2000 : 1200, true, input.kind === 'continue');
+  if (input.chapterAfter && input.kind !== 'continue') add('选区后文', input.chapterAfter, 600);
   return sources;
 }
 
@@ -135,7 +136,8 @@ export function buildAiMessages(
   input: AssembleInput,
   chars: Character[],
   lore: LoreEntry[],
-  props: Prop[] = []
+  props: Prop[] = [],
+  sourcesOverride?: ContextSource[]
 ): AiMessage[] {
   const sys: AiMessage = {
     role: 'system',
@@ -151,7 +153,7 @@ export function buildAiMessages(
   const parts: string[] = [];
   parts.push(`【作品】《${input.book.title}》`);
   parts.push(`【本章】第${input.chapter.index + 1}章 ${input.chapter.title}${input.chapter.synopsis ? '：' + clip(input.chapter.synopsis, 100) : ''}`);
-  for (const source of buildContextSources(input, chars, lore, props)) parts.push(`【${source.label}】\n${source.text}`);
+  for (const source of sourcesOverride ?? buildContextSources(input, chars, lore, props)) parts.push(`【${source.label}】\n${source.text}`);
 
   const n = input.targetWords ?? 600;
   switch (input.kind) {

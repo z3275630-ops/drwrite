@@ -16,7 +16,7 @@ export default function OutlineModal(props: {
   onClose: () => void;
 }) {
   return (
-    <Modal title={`第${props.meta.index + 1}章 · 章纲`} width={560} onClose={props.onClose}>
+    <Modal title={`第${props.meta.index + 1}章 · 章纲`} width={560} onClose={props.onClose} busy={props.busy}>
       <p className="hint-text">
         本章的写作要点（开场承接 → 事件推进 → 结尾钩子）。写正文前定个纲，AI 续写会严格按纲推进。
       </p>
@@ -37,10 +37,10 @@ export default function OutlineModal(props: {
         >
           {props.busy ? 'AI 起草中…' : '✦ AI 起草章纲'}
         </button>
-        <button className="ghost-btn" onClick={props.onClose}>
+        <button className="ghost-btn" disabled={props.busy} onClick={props.onClose}>
           取消
         </button>
-        <button className="primary-btn" onClick={props.onSave}>
+        <button className="primary-btn" disabled={props.busy} onClick={props.onSave}>
           保存
         </button>
       </div>

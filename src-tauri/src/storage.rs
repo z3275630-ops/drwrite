@@ -48,6 +48,7 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 }
 
 pub fn ensure_no_pending_restore(path: &Path) -> io::Result<()> {
+    crate::book_lease::assert_path_access(path)?;
     for parent in path.ancestors().skip(1) {
         if parent.join(JOURNAL).exists() {
             return Err(invalid("作品恢复尚未完成。请重新打开这本书以回滚恢复；暂不写入。"));
@@ -87,9 +88,11 @@ fn checksum(bytes: &[u8]) -> String {
 }
 
 fn collect(base: &Path, dir: &Path, records: &mut Vec<FileRecord>) -> io::Result<()> {
+    crate::book_files::reject_link(dir)?;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let kind = entry.file_type()?;
+        crate::book_files::reject_link(&entry.path())?;
         if kind.is_symlink() { return Err(invalid("快照不支持符号链接")); }
         if kind.is_dir() { collect(base, &entry.path(), records)?; }
         else if kind.is_file() {
@@ -115,6 +118,8 @@ fn inventory(base: &Path) -> io::Result<Vec<FileRecord>> {
 }
 
 fn validate_book(dir: &Path) -> io::Result<()> {
+    crate::book_files::reject_link(&dir.join("book.json"))?;
+    crate::book_files::reject_link(&dir.join("chapters"))?;
     let book: Value = serde_json::from_slice(&fs::read(dir.join("book.json"))?).map_err(|e| invalid(e.to_string()))?;
     if book["protocolVersion"].as_u64() != Some(1) || !book["id"].is_string() {
         return Err(invalid("作品格式不受支持"));
@@ -125,6 +130,7 @@ fn validate_book(dir: &Path) -> io::Result<()> {
         let id = chapter["id"].as_str().ok_or_else(|| invalid("章节 ID 缺失"))?;
         simple_name(id)?;
         if !seen.insert(id) { return Err(invalid("章节 ID 重复")); }
+        crate::book_files::reject_link(&dir.join("chapters").join(format!("{}.json", id)))?;
         let value: Value = serde_json::from_slice(&fs::read(dir.join("chapters").join(format!("{}.json", id)))?)
             .map_err(|e| invalid(e.to_string()))?;
         if value["doc"]["type"] != "doc" || value["meta"]["id"] != id {
@@ -134,7 +140,7 @@ fn validate_book(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_snapshot(dir: &Path) -> io::Result<bool> {
+pub(crate) fn validate_snapshot(dir: &Path) -> io::Result<bool> {
     validate_book(dir)?;
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.exists() { return Ok(true); }
@@ -149,10 +155,12 @@ fn validate_snapshot(dir: &Path) -> io::Result<bool> {
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    crate::book_files::reject_link(src)?;
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let kind = entry.file_type()?;
+        crate::book_files::reject_link(&entry.path())?;
         if kind.is_symlink() { return Err(invalid("不复制符号链接")); }
         if kind.is_dir() { copy_tree(&entry.path(), &dst.join(entry.file_name()))?; }
         else {

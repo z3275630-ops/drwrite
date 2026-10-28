@@ -1,5 +1,5 @@
 // Explicit profiling builds only. No diagnostics UI or collection in normal releases.
-const enabled = import.meta.env?.VITE_DRWRITE_PROFILE === '1';
+const enabled = import.meta.env.VITE_DRWRITE_PROFILE === '1';
 let counts: Record<string, number> = {};
 let samples: Record<string, number[]> = {};
 export const profileStart = () => enabled ? performance.now() : 0;

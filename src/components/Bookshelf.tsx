@@ -1,3 +1,5 @@
+import { version } from '../../package.json';
+import { UiSelect } from './Controls';
 import { useEffect, useState } from 'react';
 import type { BookEntry } from '../lib/library';
 import * as lib from '../lib/library';
@@ -8,6 +10,10 @@ import { deleteDir, joinPath, isDesktop } from '../lib/fs';
 import { GENRE_TEMPLATES } from '../lib/templates';
 import { toast } from './Toast';
 import { Modal } from './Modal';
+import { CommandPalette, useCommandPalette } from './CommandPalette';
+import { openSampleBook } from '../lib/sampleBook';
+import { ExternalCopyModal } from './ExternalCopyModal';
+import { RecoverySnapshots } from './RecoverySnapshots';
 
 function spineHue(id: string): number {
   let h = 0;
@@ -17,6 +23,7 @@ function spineHue(id: string): number {
 
 export default function Bookshelf(props: { onOpen: (root: string, dirName: string) => void }) {
   const [root, setRoot] = useState('');
+  const palette = useCommandPalette();
   const [books, setBooks] = useState<BookEntry[] | null>(null);
   const [problems, setProblems] = useState<lib.BookProblem[]>([]);
   const [showNew, setShowNew] = useState(false);
@@ -24,6 +31,8 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
   const [newGoal, setNewGoal] = useState('4000');
   const [newGenre, setNewGenre] = useState('');
   const [creating, setCreating] = useState(false);
+  const [copyTarget, setCopyTarget] = useState<BookEntry | null>(null);
+  const [recoverySnapshots, setRecoverySnapshots] = useState('');
   const [delTarget, setDelTarget] = useState<BookEntry | null>(null);
   const [delText, setDelText] = useState('');
   const [imp, setImp] = useState<{ name: string; title: string; parsed: ParsedChapter[]; words: number } | null>(null);
@@ -32,6 +41,9 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
 
   useEffect(() => {
     void (async () => {
+      const savedTheme = await lib.getTheme();
+      document.body.dataset.theme = savedTheme;
+      setThemeState(savedTheme);
       const r = await lib.getLibraryRoot();
       setRoot(r);
       const issues: lib.BookProblem[] = [];
@@ -46,6 +58,13 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
     setProblems(issues);
   };
 
+  const openSample = async () => {
+    if (!root || creating) return;
+    setCreating(true);
+    try { const entry = await openSampleBook(root); props.onOpen(root, entry.dirName); }
+    catch (error) { toast('示例书未完整创建：' + String(error) + '。已创建的独立文件保留，可重试，不影响你的作品。', 'err'); await refresh(); }
+    finally { setCreating(false); }
+  };
   const createBook = async () => {
     const title = newTitle.trim();
     if (!title) return;
@@ -146,12 +165,14 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
         <div className="brand">
           <span className="brand-mark" />
           <div>
-            <div className="brand-name">Drwrite</div>
+            <div className="brand-name">Drwrite <span className="brand-version">{version}</span></div>
             <div className="brand-sub">稿件与资料保存在本机 · 在线 AI 仅在使用时发送所需上下文</div>
           </div>
         </div>
         {root && (
           <div className="shelf-loc">
+            <button className="ghost-btn small" title="查找功能（Ctrl+K）" onClick={() => palette.setOpen(true)}>查找功能</button>
+            <button className="ghost-btn small" disabled={creating} onClick={() => void openSample()}>打开示例书</button>
             <button className="ghost-btn small icon-only" title={theme === 'dark' ? '切到浅色' : '切到深色'} onClick={() => void toggleTheme()}>
               {theme === 'dark' ? '☀' : '☾'}
             </button>
@@ -183,6 +204,7 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
                   <div className="book-card-title">{problem.dirName}</div>
                   <div className="recovery-error">{problem.message}</div>
                   <button className="ghost-btn small" onClick={() => void refresh()}>重试读取与恢复</button>
+                  {isDesktop && <button className="ghost-btn small" onClick={() => setRecoverySnapshots(problem.dirName)}>只读查看备份</button>}
                   <small>作品文件仍保留，恢复完成前不能进入编辑。</small>
                 </div>
               </div>)}
@@ -190,6 +212,8 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
                 <div
                   key={e.dirName}
                   className="book-card"
+                  role="button" tabIndex={0}
+                  onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); props.onOpen(root, e.dirName); } }}
                   onClick={() => props.onOpen(root, e.dirName)}
                 >
                   <span
@@ -205,6 +229,7 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
                       {e.book.stats.streakDays > 0 && <> · 连更 {e.book.stats.streakDays} 天</>}
                     </div>
                     <div className="book-card-time">{lib.relTime(e.book.updatedAt)}编辑过</div>
+                    {isDesktop && <button className="link-btn book-copy-btn" onClick={event => { event.stopPropagation(); setCopyTarget(e); }}>保存完整副本</button>}
                   </div>
                   <button
                     className="book-card-del icon-btn"
@@ -239,7 +264,17 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
           </>
         )}
       </main>
+      {palette.open && <CommandPalette onClose={() => palette.setOpen(false)} commands={[
+        { id: 'sample', title: '打开示例书与五步引导', run: openSample },
+        { id: 'new', title: '新建作品', run: () => setShowNew(true) },
+        { id: 'import', title: '导入 TXT 小说', run: pickTxt },
+        { id: 'root', title: '更改书库位置', run: changeRoot, disabled: !isDesktop ? '需要桌面版' : undefined },
+        { id: 'folder', title: '打开书库文件夹', run: openInExplorer, disabled: !isDesktop ? '需要桌面版' : undefined },
+        { id: 'theme', title: '切换明暗主题', run: toggleTheme },
+      ]} />}
 
+      {copyTarget && <ExternalCopyModal root={root} entry={copyTarget} onClose={() => setCopyTarget(null)} />}
+      {recoverySnapshots && <RecoverySnapshots root={root} dirName={recoverySnapshots} onClose={() => setRecoverySnapshots('')} />}
       {showNew && (
         <Modal title="新建作品" onClose={() => setShowNew(false)}>
           <label className="field">
@@ -254,14 +289,14 @@ export default function Bookshelf(props: { onOpen: (root: string, dirName: strin
           </label>
       <label className="field">
         <span>流派模板（可选：预置一组带引导问题的设定词条）</span>
-        <select value={newGenre} onChange={(e) => setNewGenre(e.target.value)}>
+        <UiSelect value={newGenre} onChange={(e) => setNewGenre(e.target.value)}>
           <option value="">不使用模板</option>
           {GENRE_TEMPLATES.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}
             </option>
           ))}
-        </select>
+        </UiSelect>
       </label>
       <label className="field">
         <span>日更目标（字，可留空）</span>

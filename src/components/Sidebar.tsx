@@ -1,3 +1,4 @@
+import { UiSelect } from './Controls';
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Character, ChapterMeta, LoreEntry, Prop, RefIndexEntry, CharacterTier, LoreCategory, Volume } from '../types';
@@ -18,6 +19,7 @@ export default function Sidebar(props: {
   onMove: (id: string, dir: -1 | 1) => void;
   onSynopsis: (meta: ChapterMeta) => void;
   onOutline: (meta: ChapterMeta) => void;
+  onWorkflow: (id: string, workflow: import('../lib/chapterWorkflow').ChapterWorkflow) => void;
   onReorder: (dragId: string, targetId: string, pos: 'before' | 'after') => void;
   onDropToVolume: (chapterId: string, volumeId: string | null) => void;
   onAddVolume: (title: string) => void;
@@ -90,6 +92,7 @@ export default function Sidebar(props: {
             onMove={props.onMove}
             onSynopsis={props.onSynopsis}
             onOutline={props.onOutline}
+            onWorkflow={props.onWorkflow}
             onReorder={props.onReorder}
             onDropToVolume={props.onDropToVolume}
             onAddVolume={props.onAddVolume}
@@ -106,12 +109,12 @@ export default function Sidebar(props: {
               value={charQuery}
               onChange={(e) => setCharQuery(e.target.value)}
             />
-            <select value={tierFilter} onChange={(e) => setTierFilter(e.target.value as typeof tierFilter)}>
+            <UiSelect value={tierFilter} onChange={(e) => setTierFilter(e.target.value as typeof tierFilter)}>
               <option>全部</option>
               {TIERS.map((t) => (
                 <option key={t}>{t}</option>
               ))}
-            </select>
+            </UiSelect>
           </div>
           <div className="entity-items">
             {chars.map((c) => (
@@ -170,12 +173,12 @@ export default function Sidebar(props: {
               value={loreQuery}
               onChange={(e) => setLoreQuery(e.target.value)}
             />
-            <select value={catFilter} onChange={(e) => setCatFilter(e.target.value as typeof catFilter)}>
+            <UiSelect value={catFilter} onChange={(e) => setCatFilter(e.target.value as typeof catFilter)}>
               <option>全部</option>
               {LORE_CATEGORIES.map((c) => (
                 <option key={c}>{c}</option>
               ))}
-            </select>
+            </UiSelect>
           </div>
           <div className="entity-items">
             {lore.map((l) => (

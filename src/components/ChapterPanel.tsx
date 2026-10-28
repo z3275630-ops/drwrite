@@ -3,6 +3,7 @@ import { propHolder } from '../types';
 import type { EntityTarget } from './types';
 import type { SceneInfo } from '../lib/scenes';
 import { sceneLabel } from '../lib/scenes';
+import { InlineDraft, type DraftRegistrar } from './InlineDraft';
 
 /**
  * 当前章工作台：写作计划 / 场景 / 关联资料 / 待收提醒 / 写后回顾。
@@ -22,6 +23,9 @@ export default function ChapterPanel(props: {
   onInspect: (t: EntityTarget) => void;
   onOpenOutline: () => void;
   onOpenSynopsis: () => void;
+  onSaveField: (field: 'outline' | 'synopsis', text: string) => Promise<void>;
+  onSaveScene: (identity: string, text: string) => Promise<void>;
+  onRegisterDraft: DraftRegistrar;
   onJumpChapter: (chapterId: string) => void;
 }) {
   const meta = props.book.chapters[props.activeIndex];
@@ -85,18 +89,19 @@ export default function ChapterPanel(props: {
       <div className="inspector-body">
         <div className="sec-title first">写作计划</div>
         <div className="cp-explain">章纲：准备写什么</div>
-        <button className="cp-quick-row" title="编辑本章章纲" onClick={props.onOpenOutline}>
-          <span className="cp-k">纲</span>
-          <span className="cp-v">{meta?.outline ? meta.outline.split('\n')[0].slice(0, 60) : '写下这一章的目标与转折'}</span>
-        </button>
+        <InlineDraft id={`outline:${meta.id}`} label="章纲" value={meta.outline ?? ''} onSave={text => props.onSaveField('outline', text)} onRegister={props.onRegisterDraft} onExpand={props.onOpenOutline} />
         <div className="sec-title">场景安排</div>
         {props.scenes.length ? (
           <div className="scene-list">
             {props.scenes.map((s, i) => (
-              <button key={s.blockIndex} className="scene-item" onClick={() => props.onJumpScene(s.blockIndex)}>
+              <div key={s.key ?? s.id ?? s.blockIndex}>
+              <button className="scene-item" disabled={s.missing} onClick={() => props.onJumpScene(s.blockIndex)}>
                 <span className="scene-no">{i + 1}</span>
                 {sceneLabel(s, i + 1)}
               </button>
+              {s.missing && <p role="alert">原场景已删除，摘要草稿仍保留。可复制草稿，或取消；不会写到其他场景。</p>}
+              <InlineDraft id={`scene:${meta.id}:${s.key ?? s.id}`} label="场景摘要" value={s.summary ?? ''} onSave={text => props.onSaveScene(s.key ?? s.id!, text)} onRegister={props.onRegisterDraft} />
+              </div>
             ))}
           </div>
         ) : (
@@ -153,10 +158,7 @@ export default function ChapterPanel(props: {
         <div className="sec-title">写后回顾</div>
         <div className="cp-explain">梗概：已经发生了什么，供后续回看与 AI 参考。</div>
         <div className="cp-quick">
-          <button className="cp-quick-row" title="编辑本章梗概" onClick={props.onOpenSynopsis}>
-            <span className="cp-k">概</span>
-            <span className="cp-v">{meta?.synopsis ? meta.synopsis.slice(0, 60) : '未写梗概（点此补全）'}</span>
-          </button>
+          <InlineDraft id={`synopsis:${meta.id}`} label="梗概" value={meta.synopsis ?? ''} onSave={text => props.onSaveField('synopsis', text)} onRegister={props.onRegisterDraft} onExpand={props.onOpenSynopsis} />
         </div>
       </div>
     </aside>

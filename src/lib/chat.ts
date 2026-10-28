@@ -12,7 +12,6 @@ export interface ChatMsg {
   incomplete?: boolean;
 }
 
-const MAX_STORED = 200;
 
 function chatPath(root: string, dirName: string): string {
   return joinPath(joinPath(root, dirName), 'entities', 'chat.json');
@@ -29,6 +28,5 @@ export async function loadChat(root: string, dirName: string): Promise<ChatMsg[]
 }
 
 export async function saveChat(root: string, dirName: string, msgs: ChatMsg[]): Promise<void> {
-  const trimmed = msgs.length > MAX_STORED ? msgs.slice(msgs.length - MAX_STORED) : msgs;
-  await writeJson(chatPath(root, dirName), trimmed as unknown as JsonValue);
+  await writeJson(chatPath(root, dirName), msgs as unknown as JsonValue);
 }

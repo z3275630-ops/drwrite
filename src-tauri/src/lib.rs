@@ -7,6 +7,8 @@ use std::fs;
 use std::path::Path;
 use tauri::Manager;
 mod storage;
+mod book_lease;
+mod book_files;
 
 fn io_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     storage::IO_LOCK.lock().map_err(|_| "文件操作未完成，请重启后重试".into())
@@ -16,6 +18,9 @@ fn io_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 async fn io_job<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = io_guard()?;
+        let process_guard = fs::File::options().create(true).truncate(false).read(true).write(true)
+            .open(std::env::temp_dir().join("drwrite-io-v2.lock")).map_err(|e| e.to_string())?;
+        process_guard.lock().map_err(|e| e.to_string())?;
         work()
     }).await.map_err(|error| format!("后台文件任务未完成：{}", error))?
 }
@@ -29,6 +34,21 @@ mod io_tests {
         assert_ne!(caller, worker);
         let error = tauri::async_runtime::block_on(super::io_job(|| Err::<(), _>("injected write failure".into())));
         assert_eq!(error.unwrap_err(), "injected write failure");
+    }
+    #[test]
+    fn atomic_preference_entries_preserve_other_sections() {
+        let root = std::env::temp_dir().join(format!("drwrite-settings-test-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json").to_string_lossy().into_owned();
+        tauri::async_runtime::block_on(super::patch_json_file(path.clone(), serde_json::json!({"ai":{"model":"fixture"},"theme":"dark"}), None, None)).unwrap();
+        for key in ["book-a", "book-b"] {
+            tauri::async_runtime::block_on(super::patch_json_file(path.clone(), serde_json::json!({"left":250}), Some("workspaceByBook".into()), Some(key.into()))).unwrap();
+        }
+        let data: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(data["ai"]["model"], "fixture"); assert_eq!(data["theme"], "dark");
+        assert!(data["workspaceByBook"]["book-a"].is_object()); assert!(data["workspaceByBook"]["book-b"].is_object());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -44,6 +64,25 @@ async fn read_json_file(path: String) -> Result<Value, String> {
 async fn write_json_file(path: String, value: Value) -> Result<(), String> {
     io_job(move || {
         storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+        storage::atomic_write(Path::new(&path), (text + "\n").as_bytes()).map_err(|e| e.to_string())
+    }).await
+}
+
+#[tauri::command]
+async fn patch_json_file(path: String, patch: Value, section: Option<String>, key: Option<String>) -> Result<(), String> {
+    io_job(move || {
+        storage::ensure_no_pending_restore(Path::new(&path)).map_err(|e| e.to_string())?;
+        let mut value = if Path::new(&path).exists() {
+            serde_json::from_slice::<Value>(&fs::read(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
+        } else { serde_json::json!({}) };
+        let object = value.as_object_mut().ok_or("设置文件格式错误，已停止写入")?;
+        if let (Some(section), Some(key)) = (section, key) {
+            object.entry(section).or_insert_with(|| serde_json::json!({})).as_object_mut()
+                .ok_or("设置分组格式错误")?.insert(key, patch);
+        } else {
+            object.extend(patch.as_object().ok_or("设置更新格式错误")?.clone());
+        }
         let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
         storage::atomic_write(Path::new(&path), (text + "\n").as_bytes()).map_err(|e| e.to_string())
     }).await
@@ -125,7 +164,7 @@ fn copy_dir_inner(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[tauri::command]
 async fn create_book_snapshot(book_dir: String, name_base: String) -> Result<String, String> {
-    io_job(move || storage::create_snapshot(Path::new(&book_dir), &name_base).map_err(|e| e.to_string())).await
+    io_job(move || { book_lease::assert_access(Path::new(&book_dir)).map_err(|e|e.to_string())?; storage::create_snapshot(Path::new(&book_dir), &name_base).map_err(|e| e.to_string()) }).await
 }
 
 #[tauri::command]
@@ -135,12 +174,39 @@ async fn list_book_snapshots(book_dir: String) -> Result<Vec<storage::SnapshotIn
 
 #[tauri::command]
 async fn restore_book_snapshot(book_dir: String, name: String) -> Result<bool, String> {
-    io_job(move || storage::restore_snapshot(Path::new(&book_dir), &name).map_err(|e| e.to_string())).await
+    io_job(move || { book_lease::assert_access(Path::new(&book_dir)).map_err(|e|e.to_string())?; storage::restore_snapshot(Path::new(&book_dir), &name).map_err(|e| e.to_string()) }).await
 }
 
 #[tauri::command]
 async fn recover_book_restore(book_dir: String) -> Result<bool, String> {
-    io_job(move || storage::recover_restore(Path::new(&book_dir)).map_err(|e| e.to_string())).await
+    io_job(move || { book_lease::assert_access(Path::new(&book_dir)).map_err(|e|e.to_string())?; storage::recover_restore(Path::new(&book_dir)).map_err(|e| e.to_string()) }).await
+}
+
+#[tauri::command]
+async fn acquire_book_lease(book_dir: String, token: String) -> Result<(), String> {
+    io_job(move || book_lease::acquire(Path::new(&book_dir), token).map_err(|error|error.to_string())).await
+}
+#[tauri::command]
+async fn release_book_lease(book_dir: String, token: String) -> Result<(), String> {
+    io_job(move || book_lease::release(Path::new(&book_dir), &token).map_err(|error|error.to_string())).await
+}
+#[tauri::command]
+async fn preview_book_snapshot(book_dir: String, name: String) -> Result<book_files::SnapshotView, String> {
+    io_job(move || book_files::preview_snapshot(Path::new(&book_dir), &name).map_err(|error|error.to_string())).await
+}
+#[tauri::command]
+async fn read_snapshot_chapter(book_dir: String, name: String, chapter_id: String) -> Result<Value, String> {
+    io_job(move || book_files::snapshot_chapter(Path::new(&book_dir), &name, &chapter_id).map_err(|error|error.to_string())).await
+}
+#[tauri::command]
+async fn copy_book_external(book_dir: String, parent: String, name: String, request_id: String, app: tauri::AppHandle) -> Result<book_files::CopyResult, String> {
+    io_job(move || book_files::external_copy(Path::new(&book_dir), Path::new(&parent), &name, |done,total,bytes| {
+        use tauri::Emitter; let _=app.emit("book-copy-progress",serde_json::json!({"requestId":request_id,"done":done,"total":total,"bytes":bytes}));
+    }).map_err(|error|error.to_string())).await
+}
+#[tauri::command]
+async fn export_book_files(parent: String, folder: String, files: Vec<book_files::ExportFile>) -> Result<book_files::CopyResult, String> {
+    io_job(move || book_files::export_files(Path::new(&parent), &folder, files).map_err(|error|error.to_string())).await
 }
 
 /// 默认书库位置：文档\Drwrite 书库
@@ -353,6 +419,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_json_file,
             write_json_file,
+            patch_json_file,
             write_text_file,
             read_text_file,
             list_dir_entries,
@@ -365,6 +432,12 @@ pub fn run() {
             list_book_snapshots,
             restore_book_snapshot,
             recover_book_restore,
+            acquire_book_lease,
+            release_book_lease,
+            preview_book_snapshot,
+            read_snapshot_chapter,
+            copy_book_external,
+            export_book_files,
             default_library_dir,
             app_settings_path,
             ai_chat,
