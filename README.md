@@ -2,6 +2,10 @@
 
 本地优先的长篇小说写作台。稿件与资料保存在你的电脑上；使用在线 AI 时，本次所需的正文和资料会发送到你选择的服务商。本地 Ollama 可在本机处理。
 
+**下载 Windows 版：** [0.8.0 安装包](https://github.com/z3275630-ops/drwrite/releases/download/v0.8.0/Drwrite_0.8.0_x64-setup.exe) · [免安装压缩包](https://github.com/z3275630-ops/drwrite/releases/download/v0.8.0/Drwrite_0.8.0_windows-x64_portable.zip) · [版本说明与校验值](https://github.com/z3275630-ops/drwrite/releases/tag/v0.8.0)
+
+已有用户沿用原安装位置覆盖升级，保留书库和设置；免安装版请完整解压后运行 `Drwrite.exe`。不要用不同版本同时编辑同一本书。
+
 ### v0.8.0：完整写作工作流与统一浮层
 
 - AI 发送前核对来源与预算；提案保留多个版本，对话支持独立会话和未发送草稿。
